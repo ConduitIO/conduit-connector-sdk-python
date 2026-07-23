@@ -1,0 +1,125 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "conduit-connector-sdk"
+# NOTE: version is a placeholder until the first tagged release; the release
+# workflow (fast-follow, see docs/design/20260707-python-connector-sdk.md §3)
+# will drive this from git tags.
+version = "0.1.0.dev0"
+description = "Python SDK for building Conduit source and destination connectors."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.11"
+authors = [{ name = "Conduit contributors" }]
+keywords = ["conduit", "connector", "sdk", "cdc", "grpc"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries",
+]
+
+dependencies = [
+    "grpcio>=1.75,<2",
+    "protobuf>=6.31,<8",
+    "pydantic>=2.7,<3",
+]
+
+[project.urls]
+Homepage = "https://github.com/ConduitIO/conduit-connector-sdk-python"
+Repository = "https://github.com/ConduitIO/conduit-connector-sdk-python"
+Issues = "https://github.com/ConduitIO/conduit-connector-sdk-python/issues"
+
+[project.optional-dependencies]
+dev = [
+    "grpcio-tools>=1.75,<2",
+    "ruff>=0.14,<1",
+    "mypy>=1.15,<2",
+    "pytest>=8.3,<9",
+    "pytest-asyncio>=0.25,<1",
+    "hypothesis>=6.120,<7",
+    "grpc-stubs>=1.24,<2",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/conduit"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "README.md", "LICENSE"]
+
+# --- ruff -------------------------------------------------------------------
+# Single tool for lint + format, replacing black/isort/flake8 (matches the
+# design doc's tooling choice, docs/design/20260707-python-connector-sdk.md §3).
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src", "tests", "examples"]
+# Generated protobuf/grpc stubs (buf generate output, see tools/generate-stubs.sh)
+# are vendored, not hand-written -- excluded from both lint and format, not
+# just lint (per-file-ignores below only covers lint rule selection, `ruff
+# format` needs its own exclude).
+extend-exclude = [
+    "src/conduit/_grpc/**/*_pb2.py",
+    "src/conduit/_grpc/**/*_pb2_grpc.py",
+    "src/conduit/_grpc/**/*.pyi",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # bugbear
+    "C4",  # comprehensions
+    "ASYNC", # async-specific lint (flags blocking calls in async def, relevant
+             # to the hung-event-loop failure mode, see docs/design/*)
+    "D",   # pydocstyle (docstring coverage on the public API surface)
+    "RUF", # ruff-specific
+]
+ignore = [
+    "D203", # conflicts with D211 (no-blank-line-before-class)
+    "D213", # conflicts with D212 (multi-line-summary-first-line)
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Generated protobuf/grpc stubs are vendored output, not hand-written code —
+# excluded from docstring/lint requirements. See src/conduit/_grpc/__init__.py.
+"src/conduit/_grpc/**/*_pb2.py" = ["ALL"]
+"src/conduit/_grpc/**/*_pb2_grpc.py" = ["ALL"]
+"src/conduit/_grpc/**/*.pyi" = ["ALL"]
+"tests/**" = ["D"]
+"examples/**" = ["D"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.format]
+quote-style = "double"
+
+# --- mypy --------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.11"
+strict = true
+packages = ["conduit"]
+mypy_path = "src"
+exclude = [
+    "src/conduit/_grpc/.*_pb2.*",
+]
+
+[[tool.mypy.overrides]]
+# Generated stubs are not held to strict mode; they're vendored, regenerated
+# output (see Lane A, docs/design/20260707-python-connector-sdk.md §1.5).
+module = "conduit._grpc.*"
+ignore_errors = true
+
+# --- pytest ------------------------------------------------------------------
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

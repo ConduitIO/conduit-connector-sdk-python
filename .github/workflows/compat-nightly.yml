@@ -1,0 +1,41 @@
+name: compat-nightly
+
+# Drift-detection + real-launch conformance job. Per
+# docs/design/20260707-python-connector-sdk.md §3/§4/AC#2: regenerates the
+# gRPC stubs from the current conduit-connector-protocol BSR HEAD and, once
+# Lane D/F land (examples/http-poll-source, a real Conduit build), launches
+# the example connector as a subprocess via a real, unmodified Conduit binary
+# and asserts handshake + record flow + graceful GRPCController.Shutdown.
+#
+# STATUS (week 1): stub only. The stub-regeneration step is real and runs
+# today; the "launch a real Conduit binary" step is not implemented yet —
+# it depends on Lane D (example connector) and Lane F (harness), which are not
+# week-1 scope. Do not claim this job proves AC#2/#3 until that step exists.
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+jobs:
+  drift-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - uses: bufbuild/buf-setup-action@v1
+      - run: uv sync --all-extras
+      - name: Regenerate stubs from current BSR HEAD
+        run: ./tools/generate-stubs.sh
+      - name: Fail if regenerated stubs differ from committed stubs
+        run: |
+          git diff --exit-code -- src/conduit/_grpc || {
+            echo "::error::conduit-connector-protocol has drifted from the vendored stubs. Regenerate and commit."
+            exit 1
+          }
+
+  # TODO (Lane D/F, not week 1): real-conduit-launch job — build/download a
+  # Conduit binary, launch examples/http-poll-source as a standalone plugin,
+  # assert the handshake line, record flow, and GRPCController.Shutdown path
+  # (not the 2s force-kill fallback). Tracked in the design doc's AC #2/#3.

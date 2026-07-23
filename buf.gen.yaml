@@ -1,0 +1,20 @@
+version: v1
+# Generates Python protobuf/grpc stubs for the connector protocol v2 surface
+# (SourcePlugin/DestinationPlugin/SpecifierPlugin + their opencdc/config
+# dependencies) directly from BSR, per
+# docs/design/20260707-python-connector-sdk.md §1.5. Output is vendored,
+# generated code — never hand-edited (see src/conduit/_grpc/__init__.py) and
+# regenerated via `./tools/generate-stubs.sh`, which scopes generation to
+# connector/v2 + opencdc/v1 + config/v1 with `--path` (this template alone,
+# with a bare `buf generate <module>` invocation, would also pull in the
+# deprecated v1 connector protocol and unrelated conduit-commons surfaces —
+# see tools/generate-stubs.sh for why those are excluded).
+# CONTRIBUTING.md and .github/workflows/compat-nightly.yml both call the same
+# script so the regeneration command is defined in exactly one place.
+plugins:
+  - plugin: buf.build/protocolbuffers/python:v29.2
+    out: src/conduit/_grpc
+  - plugin: buf.build/protocolbuffers/pyi:v29.2
+    out: src/conduit/_grpc
+  - plugin: buf.build/grpc/python:v1.68.0
+    out: src/conduit/_grpc
