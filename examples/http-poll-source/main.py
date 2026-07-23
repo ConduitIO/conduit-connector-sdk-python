@@ -40,6 +40,11 @@ class Config(BaseConfig):
 class HTTPPollSource(Source[Config]):
     """Polls ``config.url?since=<cursor>`` for new rows, oldest-first."""
 
+    _client: httpx.AsyncClient | None = None
+    """``None`` until :meth:`open` runs. Checked in :meth:`teardown` -- see
+    that method's docstring for why this matters even though a normal
+    Conduit-driven lifecycle always calls ``Open`` before ``Teardown``."""
+
     async def open(self, position: bytes | None) -> None:
         """Open the HTTP client and resume from ``position`` (or the beginning).
 
@@ -76,8 +81,20 @@ class HTTPPollSource(Source[Config]):
         )
 
     async def teardown(self) -> None:
-        """Close the HTTP client."""
-        await self._client.aclose()
+        """Close the HTTP client, if one was ever opened.
+
+        Guards against ``teardown()`` running before ``open()`` ever did --
+        e.g. SIGTERM arriving immediately after the subprocess starts, before
+        Conduit calls ``Configure``/``Open``. A normal Conduit-driven
+        lifecycle always calls ``Open`` before ``Teardown``, but SIGTERM can
+        arrive at any point (design doc's SIGTERM-mid-write failure mode),
+        and an unguarded ``self._client.aclose()`` here would raise
+        ``AttributeError`` in that case -- found via a real end-to-end
+        SIGTERM test while building ``conduit-connector-sdk build``'s test
+        coverage (see ``tests/test_build.py``).
+        """
+        if self._client is not None:
+            await self._client.aclose()
 
 
 if __name__ == "__main__":

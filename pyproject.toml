@@ -34,7 +34,22 @@ dependencies = [
     # standard thing"). Runtime dependency, not dev-only: `conduit.serve`
     # registers this health servicer on every plugin process.
     "grpcio-health-checking>=1.75,<2",
+    # Used by `conduit-connector-sdk build` (conduit/_build.py) to parse
+    # PEP 508 requirement strings and normalize distribution names when
+    # vendoring a connector's dependencies -- already a transitive
+    # dependency of pip/hatchling in practice, but a real, direct runtime
+    # dependency of this SDK's own `build` command, so declared explicitly
+    # rather than relied on implicitly.
+    "packaging>=23,<26",
 ]
+
+[project.scripts]
+# `build` packages a connector project into a self-contained,
+# directly-executable artifact -- see conduit/_build.py's module
+# docstring for why this is required (not just convenient) for Conduit to
+# launch a standalone connector (design doc §1.1.6: Conduit execs with a
+# clean environment, no inherited PATH).
+conduit-connector-sdk = "conduit._cli:main"
 
 [project.urls]
 Homepage = "https://github.com/ConduitIO/conduit-connector-sdk-python"

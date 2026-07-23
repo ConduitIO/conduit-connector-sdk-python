@@ -393,8 +393,40 @@ async def _build_plugin_server(
         asyncio.run_coroutine_threadsafe(_sigterm_shutdown(), loop)
 
     async def _sigterm_shutdown() -> None:
-        await run_teardown_once()
-        shutdown_requested.set()
+        """Run teardown, then unblock ``drive_shutdown`` -- unconditionally.
+
+        **Bug this fixes, found while building/testing the ``build`` CLI
+        command (item 5): if ``teardown()`` itself raised (e.g. a
+        connector's ``teardown()`` accessing a resource ``open()`` never
+        got a chance to set up, because SIGTERM arrived before Conduit
+        ever called ``Open``), the exception used to propagate out of this
+        coroutine. Since it runs via ``run_coroutine_threadsafe`` with its
+        returned ``Future`` never awaited/checked (a signal handler has
+        nothing to await), that exception was silently swallowed --
+        ``shutdown_requested`` was never set, ``drive_shutdown`` waited
+        forever, and the hung-loop watchdog fired and force-exited with a
+        "wedged event loop" diagnostic that was actively misleading: the
+        loop was never wedged, a plain exception was just never observed.
+        ``shutdown_requested.set()`` in a ``finally`` block makes forward
+        progress on shutdown unconditional -- a buggy ``teardown()`` no
+        longer blocks the *entire* SIGTERM-triggered graceful path; it only
+        loses the (already-lost, since it raised) cleanup it was supposed
+        to do, and this prints a clear diagnostic distinguishing "teardown
+        raised" from "loop genuinely wedged" rather than reaching the
+        watchdog's generic message at all.
+        """
+        try:
+            await run_teardown_once()
+        except Exception as exc:
+            print(
+                f"conduit-sdk: teardown() raised during SIGTERM-triggered "
+                f"shutdown: {exc!r} -- shutting down anyway rather than "
+                "hanging until the watchdog force-exits",
+                file=stderr,
+                flush=True,
+            )
+        finally:
+            shutdown_requested.set()
 
     coordinator = _ShutdownCoordinator(
         deadline=shutdown_deadline,
