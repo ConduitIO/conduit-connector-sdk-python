@@ -25,6 +25,9 @@ from conduit._handshake import MAGIC_COOKIE_KEY, MAGIC_COOKIE_VALUE, PROTOCOL_VE
 
 _EXAMPLE_PROJECT_DIR = Path(__file__).resolve().parent.parent / "examples" / "http-poll-source"
 
+_IS_WINDOWS = sys.platform == "win32"
+_COMPILED_EXTENSION_GLOBS = ("*.so", "*.dylib", "*.pyd")
+
 
 def _handshake_env(cache_dir: Path) -> dict[str, str]:
     env = dict(os.environ)
@@ -35,6 +38,33 @@ def _handshake_env(cache_dir: Path) -> dict[str, str]:
     # into another's.
     env["CONDUIT_CONNECTOR_BUILD_CACHE_DIR"] = str(cache_dir)
     return env
+
+
+def _exec_argv(artifact: Path) -> list[str]:
+    """Build the subprocess argv that launches ``artifact``.
+
+    On POSIX, the artifact's own absolute-interpreter shebang makes it
+    directly executable -- exactly how Conduit's dispenser launches a
+    plugin (design doc §1.1.6), so the argv is just the artifact path.
+
+    Windows has no shebang-based direct execution at all (`CreateProcess`
+    dispatches by file extension, not by parsing a leading `#!` line --
+    confirmed empirically: invoking the bare artifact path on
+    windows-latest CI raises `OSError: [WinError 193] %1 is not a valid
+    Win32 application`). This is a real, known platform gap the design
+    doc's Risks & open questions already flagged ("Windows subprocess
+    launch specifics ... untested until the CI matrix actually runs it") --
+    now that it does, this is exactly that gap, not swept under the rug.
+    Solving Windows-native direct execution (e.g. via `.pyz`/`py.exe` file
+    association, which is a machine-configuration concern, not something
+    this build command controls) is out of scope for this fix; tests that
+    only need the artifact's *contents* to be correct explicitly invoke it
+    via `sys.executable` on Windows instead of asserting the (POSIX-only)
+    zero-prefix direct-exec property.
+    """
+    if _IS_WINDOWS:
+        return [sys.executable, str(artifact)]
+    return [str(artifact)]
 
 
 @pytest.fixture(scope="module")
@@ -49,6 +79,11 @@ def built_artifact(tmp_path_factory: pytest.TempPathFactory) -> Path:
 class TestBuildConnectorArtifact:
     def test_output_file_exists_and_is_executable(self, built_artifact: Path) -> None:
         assert built_artifact.is_file()
+        if _IS_WINDOWS:
+            # Windows has no POSIX executable-bit concept for arbitrary
+            # file extensions (`os.chmod`'s execute bits are a no-op for a
+            # `.pyz` file there) -- see `_exec_argv`'s docstring.
+            return
         mode = built_artifact.stat().st_mode
         assert mode & stat.S_IXUSR, "artifact must have the executable bit set"
 
@@ -70,11 +105,12 @@ class TestBuildConnectorArtifact:
     ) -> None:
         """Exec the artifact PATH itself -- not `python <artifact>` -- exactly
 
-        how Conduit's dispenser launches a standalone connector subprocess.
+        how Conduit's dispenser launches a standalone connector subprocess
+        (POSIX only -- see `_exec_argv`'s docstring for the Windows gap).
         """
         cache_dir = tmp_path / "cache"
         proc = subprocess.Popen(
-            [str(built_artifact)],  # <-- the artifact itself is the executable
+            _exec_argv(built_artifact),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=_handshake_env(cache_dir),
@@ -99,6 +135,17 @@ class TestBuildConnectorArtifact:
                 proc.kill()
                 proc.wait()
 
+    @pytest.mark.skipif(
+        _IS_WINDOWS,
+        reason=(
+            "Windows has no real SIGTERM: subprocess.Popen.send_signal(SIGTERM) "
+            "maps to TerminateProcess() there -- an unconditional hard kill, not "
+            "something conduit.serve's SIGTERM handler ever sees -- so this test "
+            "would not exercise the graceful path it's meant to pin at all. "
+            "Windows-native graceful shutdown is a documented open risk in the "
+            "design doc ('Windows subprocess launch specifics'), not solved here."
+        ),
+    )
     def test_sigterm_triggers_prompt_graceful_shutdown(
         self, built_artifact: Path, tmp_path: Path
     ) -> None:
@@ -110,14 +157,14 @@ class TestBuildConnectorArtifact:
         when `SIGTERM` arrived before `Open` was ever called, silently
         swallowing the exception and hanging until the watchdog fired; see
         `conduit/serve.py`'s `_sigterm_shutdown` and the example's
-        `teardown()` guard).
+        `teardown()` guard). POSIX only -- see the `skipif` reason above.
         """
         import signal
         import time
 
         cache_dir = tmp_path / "cache"
         proc = subprocess.Popen(
-            [str(built_artifact)],
+            _exec_argv(built_artifact),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=_handshake_env(cache_dir),
@@ -148,7 +195,7 @@ class TestBuildConnectorArtifact:
 
         for _ in range(2):
             proc = subprocess.Popen(
-                [str(built_artifact)],
+                _exec_argv(built_artifact),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 env=env,
@@ -178,7 +225,7 @@ class TestBuildConnectorArtifact:
         """
         cache_dir = tmp_path / "cache"
         proc = subprocess.Popen(
-            [str(built_artifact)],
+            _exec_argv(built_artifact),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=_handshake_env(cache_dir),
@@ -197,7 +244,9 @@ class TestBuildConnectorArtifact:
         extracted = list(cache_dir.glob("*/_payload"))
         assert len(extracted) == 1
         payload_dir = extracted[0]
-        so_files = list(payload_dir.rglob("*.so")) + list(payload_dir.rglob("*.dylib"))
+        so_files = [
+            match for glob in _COMPILED_EXTENSION_GLOBS for match in payload_dir.rglob(glob)
+        ]
         assert so_files, "expected at least one compiled extension module to be vendored"
         assert (payload_dir / "conduit").is_dir()
         assert (payload_dir / "httpx").is_dir()
