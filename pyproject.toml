@@ -28,6 +28,12 @@ dependencies = [
     "grpcio>=1.75,<2",
     "protobuf>=6.31,<8",
     "pydantic>=2.7,<3",
+    # Standard package for grpc.health.v1 (SERVING/NOT_SERVING for the
+    # "plugin" service go-plugin's client probes, §1.1.5) -- not hand-rolled,
+    # per the Lane B build task and CLAUDE.md ("don't hand-roll the
+    # standard thing"). Runtime dependency, not dev-only: `conduit.serve`
+    # registers this health servicer on every plugin process.
+    "grpcio-health-checking>=1.75,<2",
 ]
 
 [project.urls]
@@ -44,6 +50,15 @@ dev = [
     "pytest-asyncio>=0.25,<1",
     "hypothesis>=6.120,<7",
     "grpc-stubs>=1.24,<2",
+    # Bounds the hung-event-loop watchdog test (▶ MUST-FIX 3) and the
+    # deterministic-shutdown test (▶ MUST-FIX 2) so a regression that makes
+    # either hang fails CI promptly instead of hanging the test run itself.
+    "pytest-timeout>=2.3,<3",
+    # Only used by the example connector (examples/http-poll-source/main.py)
+    # and this repo's acceptance test for it
+    # (tests/test_example_http_poll_source.py) -- not a runtime dependency
+    # of the SDK itself.
+    "httpx>=0.27,<1",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -100,6 +115,22 @@ ignore = [
 [tool.ruff.lint.pydocstyle]
 convention = "google"
 
+[tool.ruff.lint.isort]
+# `connector`/`config`/`opencdc` are the generated gRPC/protobuf stubs'
+# top-level package names -- reachable only because `conduit._grpc`'s own
+# `__init__.py` prepends its directory to `sys.path` at import time (see
+# that module's docstring). Without this, ruff's isort treats them as
+# third-party (unrecognized names), which sorts the *whole* third-party
+# import block before the first-party `import conduit._grpc` line that
+# must run first for the sys.path side effect to take effect -- that
+# reordering is a real correctness bug (verified: it breaks the import
+# chain at runtime, not just a style nit), not a hypothetical one. Treating
+# these as known-first-party groups them with `conduit` imports, where
+# alphabetical order happens to place `conduit` before `config`/
+# `connector`/`opencdc` -- keeping `ruff check --fix`/`ruff format`
+# idempotent against the ordering this code actually depends on.
+known-first-party = ["conduit", "config", "connector", "opencdc"]
+
 [tool.ruff.format]
 quote-style = "double"
 
@@ -108,18 +139,48 @@ quote-style = "double"
 python_version = "3.11"
 strict = true
 packages = ["conduit"]
-mypy_path = "src"
+# `src/conduit/_grpc` is also on mypy_path (not just `src`): protoc's Python
+# codegen emits *absolute* imports rooted at each .proto file's own package
+# path (e.g. `from connector.v2 import source_pb2`, `from config.v1 import
+# parameter_pb2`), not imports nested under `conduit._grpc` -- see
+# `src/conduit/_grpc/__init__.py`'s docstring for why (protobuf codegen's own
+# "DO NOT EDIT" output, not patched to nest the imports). At runtime that
+# package's `__init__.py` prepends its own directory to `sys.path` so those
+# absolute imports resolve; mypy has no equivalent of a runtime sys.path
+# mutation, so it needs the same directory on `mypy_path` statically, or it
+# can't find `connector.v2`/`config.v1`/`opencdc.v1` as modules at all (this
+# was found to be missing, not a pre-existing decision -- see PR description).
+mypy_path = ["src", "src/conduit/_grpc"]
 exclude = [
     "src/conduit/_grpc/.*_pb2.*",
+    # These three subtrees are reached exclusively via the top-level
+    # `connector`/`config`/`opencdc` names (the second `mypy_path` entry
+    # above) -- excluding them here too stops mypy's `packages` walk from
+    # *also* discovering them as `conduit._grpc.connector`/`.config`/
+    # `.opencdc`, which otherwise collides ("Source file found twice under
+    # different module names") since both paths resolve to the same files.
+    "^src/conduit/_grpc/connector/",
+    "^src/conduit/_grpc/config/",
+    "^src/conduit/_grpc/opencdc/",
 ]
 
 [[tool.mypy.overrides]]
 # Generated stubs are not held to strict mode; they're vendored, regenerated
 # output (see Lane A, docs/design/20260707-python-connector-sdk.md §1.5).
-module = "conduit._grpc.*"
+# The `connector.*`/`config.*`/`opencdc.*` module names are the *same*
+# generated stubs, reached via the absolute-import top-level names protoc
+# emits (see the `mypy_path` comment above) rather than through
+# `conduit._grpc.*` -- both patterns need to be excluded for the same
+# vendored-code reason, they're just two different names for the same files.
+module = ["conduit._grpc.*", "connector.*", "config.*", "opencdc.*"]
 ignore_errors = true
 
 # --- pytest ------------------------------------------------------------------
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# A generous global ceiling (not the watchdog/shutdown tests' own much
+# tighter deadlines) so a genuine regression that hangs a test -- e.g. the
+# hung-event-loop watchdog silently failing to fire -- fails CI with a
+# clear timeout instead of hanging the whole run indefinitely.
+timeout = 60
