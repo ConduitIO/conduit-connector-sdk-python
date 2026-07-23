@@ -919,13 +919,18 @@ replacement for, the ordinary (non-wedged) SIGTERM-mid-write drain test.
    interaction with process-exit signal handling needs care. **This risk is
    now split into two distinct sub-cases, per ▶ MUST-FIX 3 above**: (a) the
    ordinary case — an event loop that's mid-`await` when SIGTERM arrives must
-   let in-flight writes drain before exit (covered by the ordinary
-   SIGTERM-mid-write test), and (b) the **hung-loop** case — SIGTERM arrives
-   while the loop is wedged and cannot process the signal handler at all,
-   which has no Go analog and needs the bounded watchdog mitigation and its
-   own dedicated test. Treating these as one risk understates (b), which is
-   the one that can genuinely hang a shutdown indefinitely without the
-   watchdog.
+   let in-flight reads/writes drain before `teardown()` runs, enforced by
+   `_SourceServicer.drain`/`_DestinationServicer.drain` (`conduit/source.py`,
+   `conduit/destination.py`) and wired into `conduit/serve.py`'s
+   `_sigterm_shutdown`; covered by
+   `tests/test_serve.py::TestSigtermDrainsInFlightOperation`'s
+   `test_sigterm_mid_write_drains_before_teardown` and
+   `test_sigterm_mid_read_drains_before_teardown` — and (b) the **hung-loop**
+   case — SIGTERM arrives while the loop is wedged and cannot process the
+   signal handler at all, which has no Go analog and needs the bounded
+   watchdog mitigation and its own dedicated test. Treating these as one risk
+   understates (b), which is the one that can genuinely hang a shutdown
+   indefinitely without the watchdog.
 4. **Performance vs. Go is unknown and unclaimed.** No benchmark exists yet;
    per CLAUDE.md, no performance claim should be made about this SDK until a
    `benchi` run is committed to the repo.

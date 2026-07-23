@@ -1,5 +1,6 @@
-"""Tests for :mod:`conduit.serve` -- deterministic shutdown (▶ MUST-FIX 2)
-and the hung-event-loop watchdog (▶ MUST-FIX 3).
+"""Tests for :mod:`conduit.serve` -- deterministic shutdown (▶ MUST-FIX 2),
+the hung-event-loop watchdog (▶ MUST-FIX 3), and the SIGTERM-triggered
+in-flight-operation drain (invariant 7).
 
 Per the design doc's tightened Phase-1 acceptance criterion: the shutdown
 test must be a deterministic RPC-invocation assertion, not a timing/log
@@ -8,6 +9,13 @@ SDK's real ``grpc.aio`` server with its actual ``GRPCController`` servicer,
 connects a real gRPC client to it, calls ``Shutdown``, and asserts (a) the
 RPC succeeds and (b) ``teardown()`` ran to completion beforehand -- via a
 spy, not a race against a clock.
+
+``TestSigtermDrainsInFlightOperation`` holds the same bar for the
+SIGTERM-triggered path: ``tests/test_build.py``'s only SIGTERM test fires the
+signal *before* ``Open()`` is ever called, so it has never exercised draining
+an in-flight ``read()``/``write()`` -- see this module's ``_sigterm_shutdown``
+docstring and the design doc's Risks & open questions §3 for the gap this
+class closes.
 """
 
 from __future__ import annotations
@@ -15,24 +23,28 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import io
+import signal
 import threading
 import time
+from collections.abc import AsyncIterator
 
 import grpc
 import grpc.aio
 import pytest
 from google.protobuf import empty_pb2
 
+from conduit._grpc.adapters import record_to_proto
 from conduit.config import BaseConfig, Specification
 from conduit.destination import Destination
 from conduit.errors import BackoffRetry
-from conduit.record import Record
+from conduit.record import Operation, Record
 from conduit.serve import (
     DEFAULT_SHUTDOWN_DEADLINE_SECONDS,
     _build_plugin_server,
     _ShutdownCoordinator,
 )
 from conduit.source import Source
+from connector.v2 import destination_pb2, destination_pb2_grpc, source_pb2, source_pb2_grpc
 
 _SPEC = Specification(name="test-plugin", version="0.0.0", author="test")
 
@@ -61,6 +73,63 @@ class _TeardownSpyDestination(Destination[_Config]):
 
     async def teardown(self) -> None:
         self.teardown_calls += 1
+
+
+class _SlowReadSource(Source[_Config]):
+    """A ``Source`` whose first ``read()`` blocks until the test releases it.
+
+    ``events`` records, in order, ``"read_end"`` (appended by ``read()``
+    itself, just before returning) and ``"teardown"`` (appended by
+    ``teardown()``) -- the exact ordering
+    ``TestSigtermDrainsInFlightOperation`` asserts on.
+    """
+
+    def __init__(self) -> None:
+        self.events: list[str] = []
+        self.read_started = asyncio.Event()
+        self.read_may_finish = asyncio.Event()
+        self._call_count = 0
+
+    async def read(self) -> Record:
+        self._call_count += 1
+        if self._call_count > 1:
+            # The read loop must not call `read()` again after `drain()`
+            # has set `_stop_event` -- a second call here would mean the
+            # SIGTERM-triggered drain failed to stop the loop before
+            # teardown() ran. Raise instead of blocking forever so a
+            # regression here fails fast (a hang) rather than silently
+            # (a wrong ack).
+            raise BackoffRetry()
+        self.read_started.set()
+        await self.read_may_finish.wait()
+        self.events.append("read_end")
+        return Record(position=b"pos-1", operation=Operation.CREATE)
+
+    async def teardown(self) -> None:
+        self.events.append("teardown")
+
+
+class _SlowWriteDestination(Destination[_Config]):
+    """A ``Destination`` whose ``write()`` blocks until the test releases it.
+
+    ``events`` records, in order, ``"write_end"`` (appended by ``write()``
+    itself, just before returning) and ``"teardown"`` (appended by
+    ``teardown()``) -- the exact ordering
+    ``TestSigtermDrainsInFlightOperation`` asserts on.
+    """
+
+    def __init__(self) -> None:
+        self.events: list[str] = []
+        self.write_started = asyncio.Event()
+        self.write_may_finish = asyncio.Event()
+
+    async def write(self, records: list[Record]) -> None:
+        self.write_started.set()
+        await self.write_may_finish.wait()
+        self.events.append("write_end")
+
+    async def teardown(self) -> None:
+        self.events.append("teardown")
 
 
 async def _call_shutdown(port: int) -> empty_pb2.Empty:
@@ -266,3 +335,132 @@ def test_serve_requires_exactly_one_of_source_or_destination() -> None:
 
     with pytest.raises(ValueError, match="exactly one"):
         serve(_SPEC, source=_TeardownSpySource, destination=_TeardownSpyDestination)
+
+
+async def _empty_ack_stream() -> AsyncIterator[source_pb2.Source.Run.Request]:
+    return
+    yield  # pragma: no cover -- makes this an async generator with no items
+
+
+class TestSigtermDrainsInFlightOperation:
+    """The gap found in Tier-1 review: ``_sigterm_shutdown`` used to call
+
+    ``teardown()`` immediately on SIGTERM with no regard for an actively
+    streaming ``Run()`` -- never signaling the read/write loop to stop, never
+    awaiting an in-flight ``read()``/``write()``. These tests build the SDK's
+    real ``grpc.aio`` server, drive a real bidi-streaming ``Run()`` call
+    against it, block the connector mid-``read()``/mid-``write()``, then
+    invoke the coordinator's real ``_on_sigterm`` entry point directly
+    (deterministic -- not waiting on OS signal-delivery timing, which
+    ``tests/test_build.py``'s subprocess-level SIGTERM test already covers
+    for the before-``Open`` case) and assert the in-flight operation
+    completes strictly *before* ``teardown()`` runs, never concurrently with
+    it.
+    """
+
+    async def test_sigterm_mid_read_drains_before_teardown(self) -> None:
+        exit_calls: list[int] = []
+        handle = await _build_plugin_server(
+            _SPEC, source=_SlowReadSource, exit_fn=exit_calls.append
+        )
+        spy = handle.connector_instance
+        assert isinstance(spy, _SlowReadSource)
+
+        channel = grpc.aio.insecure_channel(f"127.0.0.1:{handle.port}")
+        try:
+            stub = source_pb2_grpc.SourcePluginStub(channel)
+            call = stub.Run(_empty_ack_stream())
+            responses: list[source_pb2.Source.Run.Response] = []
+
+            async def _consume() -> None:
+                async for response in call:
+                    responses.append(response)
+
+            consume_task = asyncio.create_task(_consume())
+
+            # Wait until `read()` is genuinely in flight (blocked inside the
+            # call, not merely "the RPC started").
+            await asyncio.wait_for(spy.read_started.wait(), timeout=2)
+
+            # Simulate SIGTERM landing *while `read()` is in flight* -- the
+            # exact scenario the gap missed. Calling the coordinator's real
+            # signal-handler method directly (rather than `os.kill`) keeps
+            # this deterministic; it is the same code a real SIGTERM would
+            # invoke (`signal.signal`'s registered callback).
+            handle.coordinator._on_sigterm(signal.SIGTERM, None)
+
+            # No matter how much the event loop is given to run here,
+            # `teardown()` cannot legitimately have appended to `events` yet
+            # -- `read()` is still blocked on `read_may_finish`, which
+            # nothing but this test can set. If the gap this test targets
+            # regressed (teardown() racing the in-flight read), this is
+            # where it would show up.
+            await asyncio.sleep(0.05)
+            assert spy.events == []
+
+            # Let the in-flight read() complete.
+            spy.read_may_finish.set()
+
+            await asyncio.wait_for(handle.drive_task, timeout=2)
+            await asyncio.wait_for(consume_task, timeout=2)
+
+            assert spy.events == ["read_end", "teardown"]
+            assert handle.coordinator.is_confirmed
+            assert len(responses) == 1
+            assert exit_calls == []  # the watchdog must never have fired
+        finally:
+            await channel.close()
+            with contextlib.suppress(Exception):
+                await handle.server.stop(None)
+
+    async def test_sigterm_mid_write_drains_before_teardown(self) -> None:
+        exit_calls: list[int] = []
+        handle = await _build_plugin_server(
+            _SPEC, destination=_SlowWriteDestination, exit_fn=exit_calls.append
+        )
+        spy = handle.connector_instance
+        assert isinstance(spy, _SlowWriteDestination)
+
+        channel = grpc.aio.insecure_channel(f"127.0.0.1:{handle.port}")
+        try:
+            stub = destination_pb2_grpc.DestinationPluginStub(channel)
+            record = Record(position=b"pos-1", operation=Operation.CREATE)
+
+            async def _one_batch() -> AsyncIterator[destination_pb2.Destination.Run.Request]:
+                yield destination_pb2.Destination.Run.Request(records=[record_to_proto(record)])
+
+            call = stub.Run(_one_batch())
+            acks: list[destination_pb2.Destination.Run.Response] = []
+
+            async def _consume() -> None:
+                async for response in call:
+                    acks.append(response)
+
+            consume_task = asyncio.create_task(_consume())
+
+            # Wait until `write()` is genuinely in flight.
+            await asyncio.wait_for(spy.write_started.wait(), timeout=2)
+
+            # Simulate SIGTERM landing *while `write()` is in flight*.
+            handle.coordinator._on_sigterm(signal.SIGTERM, None)
+
+            # Same reasoning as the read case: `teardown()` cannot
+            # legitimately have run yet -- `write()` is still blocked on
+            # `write_may_finish`.
+            await asyncio.sleep(0.05)
+            assert spy.events == []
+
+            # Let the in-flight write() complete.
+            spy.write_may_finish.set()
+
+            await asyncio.wait_for(handle.drive_task, timeout=2)
+            await asyncio.wait_for(consume_task, timeout=2)
+
+            assert spy.events == ["write_end", "teardown"]
+            assert handle.coordinator.is_confirmed
+            assert len(acks) == 1
+            assert exit_calls == []  # the watchdog must never have fired
+        finally:
+            await channel.close()
+            with contextlib.suppress(Exception):
+                await handle.server.stop(None)

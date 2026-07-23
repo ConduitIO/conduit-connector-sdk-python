@@ -29,7 +29,7 @@ import os
 import signal
 import sys
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, NoReturn, TextIO
 
@@ -266,6 +266,12 @@ class _ServerHandle:
     connector_instance: Source[Any] | Destination[Any]
     shutdown_requested: asyncio.Event
     drive_task: asyncio.Task[None]
+    drain: Callable[[], Awaitable[None]]
+    """Bound ``_SourceServicer.drain``/``_DestinationServicer.drain`` for
+    whichever of the two was registered -- stops the active read/write loop
+    from accepting new work and awaits any operation already in flight. Used
+    by ``_sigterm_shutdown`` (invariant 7) to drain the running connector
+    before ``teardown()``; also usable directly by tests."""
 
 
 async def _build_plugin_server(
@@ -318,27 +324,32 @@ async def _build_plugin_server(
     instance: Source[Any] | Destination[Any]
     source_params: Mapping[str, Any] = {}
     destination_params: Mapping[str, Any] = {}
+    drain: Callable[[], Awaitable[None]]
 
     if source is not None:
         config_cls = _resolve_source_config_class(source)
         instance = source()
+        source_servicer = _SourceServicer(instance, config_cls)
         # The generated `*_pb2_grpc.py` files carry no type annotations (no
         # companion `.pyi` for the service-registration helpers, only for
         # the message types) -- calling into them from this strict-mode
         # module is an intentional, vendored-codegen boundary, not a typing
         # gap in our own code (see pyproject.toml's mypy overrides comment).
         source_pb2_grpc.add_SourcePluginServicer_to_server(  # type: ignore[no-untyped-call]
-            _SourceServicer(instance, config_cls), server
+            source_servicer, server
         )
         source_params = to_parameters(config_cls)
+        drain = source_servicer.drain
     else:
         assert destination is not None  # narrowed by the xor check above
         config_cls = _resolve_destination_config_class(destination)
         instance = destination()
+        destination_servicer = _DestinationServicer(instance, config_cls)
         destination_pb2_grpc.add_DestinationPluginServicer_to_server(  # type: ignore[no-untyped-call]
-            _DestinationServicer(instance, config_cls), server
+            destination_servicer, server
         )
         destination_params = to_parameters(config_cls)
+        drain = destination_servicer.drain
 
     specifier_pb2_grpc.add_SpecifierPluginServicer_to_server(  # type: ignore[no-untyped-call]
         _SpecifierServicer(specification, source_params, destination_params), server
@@ -393,28 +404,65 @@ async def _build_plugin_server(
         asyncio.run_coroutine_threadsafe(_sigterm_shutdown(), loop)
 
     async def _sigterm_shutdown() -> None:
-        """Run teardown, then unblock ``drive_shutdown`` -- unconditionally.
+        """Drain the active read/write loop, run teardown, then unblock ``drive_shutdown``.
 
-        **Bug this fixes, found while building/testing the ``build`` CLI
-        command (item 5): if ``teardown()`` itself raised (e.g. a
-        connector's ``teardown()`` accessing a resource ``open()`` never
-        got a chance to set up, because SIGTERM arrived before Conduit
-        ever called ``Open``), the exception used to propagate out of this
-        coroutine. Since it runs via ``run_coroutine_threadsafe`` with its
-        returned ``Future`` never awaited/checked (a signal handler has
-        nothing to await), that exception was silently swallowed --
-        ``shutdown_requested`` was never set, ``drive_shutdown`` waited
-        forever, and the hung-loop watchdog fired and force-exited with a
-        "wedged event loop" diagnostic that was actively misleading: the
-        loop was never wedged, a plain exception was just never observed.
+        Runs unconditionally, regardless of whether draining or teardown
+        raise -- see the "Bug this also still fixes" section below.
+
+        **Invariant 7 (graceful shutdown by default) gap this closes:** this
+        coroutine used to call ``run_teardown_once()`` immediately on
+        ``SIGTERM``, with no regard for whether ``Run`` was actively
+        streaming -- ``teardown()`` (e.g. closing a DB pool) could then run
+        concurrently with an in-flight ``Source.read()``/``Destination.
+        write()``, racing resource cleanup against live I/O. ``drain()``
+        (``_SourceServicer.drain``/``_DestinationServicer.drain``, whichever
+        was registered) is awaited first: it performs the same
+        stop-the-loop-then-wait-for-it ordering the deterministic path
+        already gets for free (Conduit's own ``Stop`` RPC → ``Run`` ends →
+        ``Teardown`` RPC), so a SIGTERM-triggered shutdown drains an
+        in-flight operation before teardown runs, not concurrently with it.
+        This is not a data-loss fix -- a write raised mid-flight already
+        nacks the whole batch (see ``_DestinationServicer._write_batch``)
+        and Conduit redelivers on restart either way -- it is what makes
+        this SDK's SIGTERM path actually graceful rather than merely
+        forward-progressing. The hung-loop watchdog (▶ MUST-FIX 3) still
+        bounds how long this can take: it was already started, on its own
+        thread, before this coroutine was even scheduled (see
+        ``_ShutdownCoordinator._on_sigterm``), so a ``drain()`` that never
+        returns (a genuinely wedged read/write) still force-exits on
+        schedule rather than hanging forever.
+
+        **Bug this also still fixes, found while building/testing the
+        ``build`` CLI command (item 5): if ``drain()`` or ``teardown()``
+        itself raised (e.g. a connector's ``teardown()`` accessing a
+        resource ``open()`` never got a chance to set up, because SIGTERM
+        arrived before Conduit ever called ``Open``), the exception used to
+        propagate out of this coroutine. Since it runs via
+        ``run_coroutine_threadsafe`` with its returned ``Future`` never
+        awaited/checked (a signal handler has nothing to await), that
+        exception was silently swallowed -- ``shutdown_requested`` was
+        never set, ``drive_shutdown`` waited forever, and the hung-loop
+        watchdog fired and force-exited with a "wedged event loop"
+        diagnostic that was actively misleading: the loop was never
+        wedged, a plain exception was just never observed.
         ``shutdown_requested.set()`` in a ``finally`` block makes forward
-        progress on shutdown unconditional -- a buggy ``teardown()`` no
-        longer blocks the *entire* SIGTERM-triggered graceful path; it only
-        loses the (already-lost, since it raised) cleanup it was supposed
-        to do, and this prints a clear diagnostic distinguishing "teardown
-        raised" from "loop genuinely wedged" rather than reaching the
-        watchdog's generic message at all.
+        progress on shutdown unconditional -- a buggy ``drain()``/
+        ``teardown()`` no longer blocks the *entire* SIGTERM-triggered
+        graceful path; it only loses the (already-lost, since it raised)
+        cleanup it was supposed to do, and this prints a clear diagnostic
+        distinguishing "drain/teardown raised" from "loop genuinely
+        wedged" rather than reaching the watchdog's generic message at all.
         """
+        try:
+            await drain()
+        except Exception as exc:
+            print(
+                f"conduit-sdk: draining the in-flight read/write loop raised "
+                f"during SIGTERM-triggered shutdown: {exc!r} -- running "
+                "teardown() anyway rather than skipping it",
+                file=stderr,
+                flush=True,
+            )
         try:
             await run_teardown_once()
         except Exception as exc:
@@ -449,6 +497,7 @@ async def _build_plugin_server(
         connector_instance=instance,
         shutdown_requested=shutdown_requested,
         drive_task=drive_task,
+        drain=drain,
     )
 
 

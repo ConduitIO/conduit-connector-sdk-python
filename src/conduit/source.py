@@ -331,10 +331,30 @@ class _SourceServicer(source_pb2_grpc.SourcePluginServicer):
         self, request: source_pb2.Source.Stop.Request, context: object
     ) -> source_pb2.Source.Stop.Response:
         """Signal the read loop to stop; block until it has, then report the last position."""
+        await self.drain()
+        return source_pb2.Source.Stop.Response(last_position=self._last_position)
+
+    async def drain(self) -> None:
+        """Signal the read loop to stop and await it fully stopping.
+
+        Invariant 7 (graceful shutdown by default) enforcement site: called
+        by ``conduit.serve``'s SIGTERM handler before ``teardown()`` runs, so
+        an in-flight ``read()`` (and the read loop it drives) never races
+        ``teardown()`` closing a resource the loop is still using.
+
+        The same stop-then-wait sequence :meth:`Stop` performs for the
+        deterministic Conduit-driven path (``Stop`` RPC → ``Run`` ends →
+        ``Teardown`` RPC), factored out so ``conduit.serve``'s SIGTERM
+        handler can perform the identical ordered drain before running
+        ``teardown()`` -- invariant 7 (graceful shutdown by default) applies
+        just as much to a SIGTERM-triggered shutdown as to the deterministic
+        one; only the RPC that observes the drain differs. If ``Run`` was
+        never invoked (e.g. SIGTERM arrives before Conduit ever calls it),
+        this returns immediately -- there is no read loop to wait for.
+        """
         self._stop_event.set()
         if self._run_started:
             await self._stopped_event.wait()
-        return source_pb2.Source.Stop.Response(last_position=self._last_position)
 
     async def Teardown(
         self, request: source_pb2.Source.Teardown.Request, context: object

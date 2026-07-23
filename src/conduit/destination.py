@@ -23,6 +23,7 @@ exception -- nacks the entire batch outright.
 from __future__ import annotations
 
 import abc
+import asyncio
 from collections.abc import AsyncIterator, Sequence
 from typing import Any, Generic, TypeVar
 
@@ -138,6 +139,9 @@ class _DestinationServicer(destination_pb2_grpc.DestinationPluginServicer):
         """
         self._destination = destination
         self._config_cls = config_cls
+        self._stop_event = asyncio.Event()
+        self._stopped_event = asyncio.Event()
+        self._run_started = False
 
     async def Configure(
         self,
@@ -180,11 +184,35 @@ class _DestinationServicer(destination_pb2_grpc.DestinationPluginServicer):
         batch, in the same order -- there is no cross-batch buffering here,
         keeping the ack/write relationship for a given batch entirely
         local to one iteration of this loop.
+
+        The ``try``/``finally`` (setting ``_stopped_event``) mirrors
+        :meth:`conduit.source._SourceServicer.Run`'s structure exactly, for
+        the same reason: it's what lets :meth:`drain` block until this
+        generator has actually finished -- including yielding (to the
+        framework) whatever ack response was already computed for the
+        in-flight batch -- rather than only until ``write()`` itself
+        returns, which would let ``conduit.serve``'s SIGTERM path tear the
+        server down (``server.stop()``) before that already-earned ack had
+        a chance to reach Conduit.
         """
-        async for request in request_iterator:
-            records = records_from_proto(request.records)
-            acks = await self._write_batch(records)
-            yield destination_pb2.Destination.Run.Response(acks=acks)
+        self._run_started = True
+        try:
+            async for request in request_iterator:
+                if self._stop_event.is_set():
+                    # A SIGTERM-triggered drain (see `drain`, below) asked
+                    # the write loop to stop accepting new batches.
+                    # Conduit's deterministic `Stop` RPC path gets this for
+                    # free -- it simply stops sending requests after calling
+                    # `Stop` -- but a SIGTERM can land mid-`Run` with more
+                    # batches already queued on the stream, so this check is
+                    # what makes the "no new write starts after the drain
+                    # point" half of `drain`'s contract actually hold.
+                    break
+                records = records_from_proto(request.records)
+                acks = await self._write_batch(records)
+                yield destination_pb2.Destination.Run.Response(acks=acks)
+        finally:
+            self._stopped_event.set()
 
     async def _write_batch(self, records: Sequence[Record]) -> list[Ack]:
         """Call ``write()`` and translate the outcome into per-record acks.
@@ -252,6 +280,42 @@ class _DestinationServicer(destination_pb2_grpc.DestinationPluginServicer):
         own responsibility, not this servicer's.
         """
         return destination_pb2.Destination.Stop.Response()
+
+    async def drain(self) -> None:
+        """Stop accepting new write batches and await any write already in flight.
+
+        Invariant 7 (graceful shutdown by default) enforcement site: called
+        by ``conduit.serve``'s SIGTERM handler before ``teardown()`` runs, so
+        an in-flight ``write()`` is never raced against ``teardown()``
+        closing a resource (e.g. a DB pool) the write is still using.
+
+        Mirrors :meth:`conduit.source._SourceServicer.drain`'s exact
+        stop-then-wait shape: sets the stop flag :meth:`Run` checks before
+        starting each new batch (see the enforcement site there), then --
+        if ``Run`` was ever invoked -- awaits ``_stopped_event``, which
+        :meth:`Run`'s ``finally`` only sets once its generator has fully
+        finished. That is deliberately stronger than merely waiting for
+        ``write()`` to return: it also covers the already-computed ack
+        response for the in-flight batch being handed back to the ``grpc.aio``
+        framework (the ``yield`` right after ``write()`` returns), so
+        ``conduit.serve``'s subsequent ``server.stop()`` doesn't abort a
+        response that was already earned. If ``Run`` was never invoked
+        (e.g. SIGTERM arrives before Conduit ever calls it), this returns
+        immediately -- there is no write loop to wait for.
+
+        There is an unavoidable, narrow window between :meth:`Run` checking
+        ``_stop_event`` and this method setting it: a batch already pulled
+        off the request stream at that instant still starts its write. This
+        mirrors a window invariant 1/3 already tolerate elsewhere -- a write
+        already committed to starting is allowed to finish, never torn
+        mid-flight -- so this method stops *new* batches after the one
+        already in flight; it does not attempt mid-write cancellation, which
+        would itself violate invariant 1/3 (a torn write can't be safely
+        un-started).
+        """
+        self._stop_event.set()
+        if self._run_started:
+            await self._stopped_event.wait()
 
     async def Teardown(
         self, request: destination_pb2.Destination.Teardown.Request, context: object
