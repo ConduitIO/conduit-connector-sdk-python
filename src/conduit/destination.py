@@ -26,12 +26,16 @@ import abc
 from collections.abc import AsyncIterator, Sequence
 from typing import Any, Generic, TypeVar
 
+import grpc
+import grpc.aio
+import pydantic
+
 import conduit._grpc  # noqa: F401  -- sets up sys.path, see conduit._grpc.__init__
 from conduit._dispatch import invoke
 from conduit._grpc.adapters import config_map_from_proto, records_from_proto
 from conduit._introspect import resolve_config_class
 from conduit.config import BaseConfig
-from conduit.errors import BatchWriteError
+from conduit.errors import BatchWriteError, format_validation_error
 from conduit.record import Record
 from connector.v2 import destination_pb2, destination_pb2_grpc
 
@@ -74,9 +78,10 @@ class Destination(abc.ABC, Generic[ConfigT]):
         """Durably write every record in ``records``, in order.
 
         Full success is "returns without raising." A partial-batch failure
-        raises :class:`~conduit.errors.BatchWriteError` with an exhaustive
-        accounting of which indices succeeded and which failed -- see that
-        class's docstring for the exact construction contract (the B1 fix).
+        raises :class:`~conduit.errors.BatchWriteError` -- typically via
+        ``raise BatchWriteError.partial(len(records), written=N, cause=exc)``,
+        the recommended constructor (see :meth:`~conduit.errors.BatchWriteError.partial`),
+        rather than hand-building the exhaustive index accounting yourself.
         Any other exception is treated by the SDK's adapter as a failure of
         the **entire** batch (see :meth:`_DestinationServicer._write_batch`)
         -- there is no partial-credit interpretation of a plain exception.
@@ -97,17 +102,15 @@ class Destination(abc.ABC, Generic[ConfigT]):
         """Called once, after the write loop stops, before process exit. Default: no-op."""
         return None
 
-    async def lifecycle_on_created(self, config: dict[str, str]) -> None:
+    async def on_created(self, config: dict[str, str]) -> None:
         """Called once, the first time this connector instance is ever run. Default: no-op."""
         return None
 
-    async def lifecycle_on_updated(
-        self, config_before: dict[str, str], config_after: dict[str, str]
-    ) -> None:
+    async def on_updated(self, config_before: dict[str, str], config_after: dict[str, str]) -> None:
         """Called when the connector's configuration changed since the last run. Default: no-op."""
         return None
 
-    async def lifecycle_on_deleted(self, config: dict[str, str]) -> None:
+    async def on_deleted(self, config: dict[str, str]) -> None:
         """Called once, when this connector instance was deleted. Default: no-op."""
         return None
 
@@ -137,10 +140,23 @@ class _DestinationServicer(destination_pb2_grpc.DestinationPluginServicer):
         self._config_cls = config_cls
 
     async def Configure(
-        self, request: destination_pb2.Destination.Configure.Request, context: object
+        self,
+        request: destination_pb2.Destination.Configure.Request,
+        context: grpc.aio.ServicerContext[Any, Any],
     ) -> destination_pb2.Destination.Configure.Response:
-        """Validate and store the plugin's config."""
-        config = self._config_cls.model_validate(config_map_from_proto(request.config))
+        """Validate and store the plugin's config.
+
+        A ``pydantic.ValidationError`` is caught explicitly and turned into
+        an ``INVALID_ARGUMENT`` status with a per-field detail message
+        (:func:`~conduit.errors.format_validation_error`) -- see
+        :meth:`conduit.source._SourceServicer.Configure` for the same
+        rationale (kept in sync with this one).
+        """
+        try:
+            config = self._config_cls.model_validate(config_map_from_proto(request.config))
+        except pydantic.ValidationError as exc:
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, format_validation_error(exc))
+            raise  # pragma: no cover -- abort() never returns; unreachable, satisfies mypy
         await invoke(self._destination.configure, config)
         return destination_pb2.Destination.Configure.Response()
 
@@ -248,7 +264,7 @@ class _DestinationServicer(destination_pb2_grpc.DestinationPluginServicer):
         self, request: destination_pb2.Destination.Lifecycle.OnCreated.Request, context: object
     ) -> destination_pb2.Destination.Lifecycle.OnCreated.Response:
         """Dispatch the connector's first-run lifecycle hook."""
-        await invoke(self._destination.lifecycle_on_created, config_map_from_proto(request.config))
+        await invoke(self._destination.on_created, config_map_from_proto(request.config))
         return destination_pb2.Destination.Lifecycle.OnCreated.Response()
 
     async def LifecycleOnUpdated(
@@ -256,7 +272,7 @@ class _DestinationServicer(destination_pb2_grpc.DestinationPluginServicer):
     ) -> destination_pb2.Destination.Lifecycle.OnUpdated.Response:
         """Dispatch the connector's config-changed lifecycle hook."""
         await invoke(
-            self._destination.lifecycle_on_updated,
+            self._destination.on_updated,
             config_map_from_proto(request.config_before),
             config_map_from_proto(request.config_after),
         )
@@ -266,7 +282,7 @@ class _DestinationServicer(destination_pb2_grpc.DestinationPluginServicer):
         self, request: destination_pb2.Destination.Lifecycle.OnDeleted.Request, context: object
     ) -> destination_pb2.Destination.Lifecycle.OnDeleted.Response:
         """Dispatch the connector's deleted lifecycle hook."""
-        await invoke(self._destination.lifecycle_on_deleted, config_map_from_proto(request.config))
+        await invoke(self._destination.on_deleted, config_map_from_proto(request.config))
         return destination_pb2.Destination.Lifecycle.OnDeleted.Response()
 
 

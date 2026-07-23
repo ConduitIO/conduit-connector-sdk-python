@@ -180,9 +180,9 @@ async def test_stop_and_teardown_defaults_are_no_ops() -> None:
     instance = MyDestination()
     await instance.open()
     await instance.teardown()
-    await instance.lifecycle_on_created({})
-    await instance.lifecycle_on_updated({}, {})
-    await instance.lifecycle_on_deleted({})
+    await instance.on_created({})
+    await instance.on_updated({}, {})
+    await instance.on_deleted({})
 
 
 def test_destination_is_abstract_without_write() -> None:

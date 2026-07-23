@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Set
 
+import pydantic
+
 
 class ConnectorError(Exception):
     """Base exception for connector-raised errors surfaced over the wire.
@@ -41,6 +43,36 @@ class ConnectorError(Exception):
         """
         super().__init__(message)
         self.code = code
+
+
+def format_validation_error(exc: pydantic.ValidationError) -> str:
+    """Format a pydantic ``ValidationError`` as a concise, per-field detail string.
+
+    Used by the ``Configure`` RPC handlers (:mod:`conduit.source`/
+    :mod:`conduit.destination`) to build the gRPC ``INVALID_ARGUMENT``
+    status detail explicitly, rather than relying on ``grpc.aio``'s own
+    generic "Unexpected <exception class>: ..." wrapping of an uncaught
+    exception (``StatusCode.UNKNOWN``) -- per ``CLAUDE.md``'s "errors are
+    API, actionable" standard, an author (or Conduit's own error surface)
+    should be able to see exactly which field failed and why, not an
+    opaque blob, and the SDK should own that contract explicitly rather
+    than depend on incidental library formatting.
+
+    Args:
+        exc: the validation error to format.
+
+    Returns:
+        A multi-line string: one summary line, then one ``<field path>:
+        <message>`` line per error. Omits pydantic's "For further
+        information visit ..." doc-link lines (``include_url=False``) --
+        noise in a gRPC status detail, not useful to an operator reading a
+        pipeline's error log.
+    """
+    lines = [f"invalid config ({exc.error_count()} error(s)):"]
+    for error in exc.errors(include_url=False):
+        loc = ".".join(str(part) for part in error["loc"]) or "<root>"
+        lines.append(f"  {loc}: {error['msg']}")
+    return "\n".join(lines)
 
 
 class BackoffRetry(ConnectorError):
@@ -84,14 +116,21 @@ class BatchWriteError(ConnectorError):
     supplied, in full, at construction time, or ``__init__`` raises
     ``ValueError``.
 
-    Two ways to construct it:
+    Three ways to construct it, from most to least recommended:
 
-    1. ``BatchWriteError(batch_size, written=N)`` -- the common case, a
-       contiguous success prefix (Go's ``n``): "everything up to index
-       ``N - 1`` succeeded, everything from ``N`` on failed." Every index
-       ``>= N`` is recorded as a generic failure.
-    2. ``BatchWriteError(batch_size, success={...}, failures={...})`` -- an
-       explicit, non-contiguous accounting. ``success`` and ``failures``
+    1. **``BatchWriteError.partial(batch_size, written=N, cause=exc)``** --
+       the recommended way to raise the common case (a contiguous success
+       prefix, Go's ``n``): "everything up to index ``N - 1`` succeeded,
+       everything from ``N`` on failed because of ``exc``." Every index
+       ``>= N`` is recorded as failed with your real ``cause`` exception,
+       not a generic placeholder -- see :meth:`partial`.
+    2. ``BatchWriteError(batch_size, written=N)`` -- same contiguous-prefix
+       shape without a specific cause; failed indices get a generic
+       internal message. Use :meth:`partial` instead when you have the
+       real exception that stopped the write.
+    3. ``BatchWriteError(batch_size, success={...}, failures={...})`` -- an
+       explicit, non-contiguous accounting, for the less common case where
+       failures aren't a simple prefix. ``success`` and ``failures``
        together must cover every index in ``range(batch_size)`` exactly
        once (no gaps, no overlaps).
 
@@ -208,3 +247,47 @@ class BatchWriteError(ConnectorError):
             if summary
             else "partial batch write failure"
         )
+
+    @classmethod
+    def partial(cls, batch_size: int, *, written: int, cause: BaseException) -> BatchWriteError:
+        """Construct the common contiguous-prefix case, with a real cause.
+
+        This is the **recommended** way to raise a partial-batch failure:
+        ``raise BatchWriteError.partial(len(records), written=3, cause=exc)``.
+        Equivalent to ``BatchWriteError(batch_size, written=written)``,
+        except every index past the written prefix is recorded as having
+        failed with ``cause`` itself -- the real exception your ``write()``
+        caught -- rather than a generic internal "not reached" placeholder.
+        This means the ack's error detail that eventually reaches Conduit
+        (and whoever's reading the pipeline's error log) reflects what
+        actually went wrong, not just that something did.
+
+        Authors never hand-build the ``success``/``failures``
+        set/mapping for this common case -- this classmethod does it,
+        reusing the exhaustive-accounting constructor path (already
+        validated) under the hood.
+
+        Args:
+            batch_size: number of records in the batch -- typically
+                ``len(records)`` from your ``write(self, records)``.
+            written: contiguous success-prefix count (Go's ``n``):
+                indices ``[0, written)`` succeeded.
+            cause: the exception that caused the write to stop after
+                ``written`` records. Recorded as every index ``>= written``'s
+                failure reason.
+
+        Returns:
+            A fully validated, ready-to-raise ``BatchWriteError``.
+
+        Raises:
+            ValueError: if ``written`` is out of range for ``batch_size``
+                (see :meth:`__init__`).
+        """
+        if not 0 <= written <= batch_size:
+            raise ValueError(
+                f"BatchWriteError.partial: written={written} is out of range for "
+                f"batch_size={batch_size} (must satisfy 0 <= written <= batch_size)"
+            )
+        success = set(range(written))
+        failures: dict[int, BaseException] = dict.fromkeys(range(written, batch_size), cause)
+        return cls(batch_size, success=success, failures=failures)

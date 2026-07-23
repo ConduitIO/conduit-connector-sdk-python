@@ -16,3 +16,16 @@ This is both the worked example *and* will become the source for
 `conduit connector new --lang python`'s scaffolded template (Phase 3), per
 the design doc's reasoning for reusing one connector for both rather than
 building a separate template repo before the SDK API has stabilized.
+
+## Notes for connector authors
+
+- **You don't need to override `Source.ack()`** unless you're also
+  acknowledging against the source system itself (e.g. committing a Kafka
+  consumer offset, deleting a queue message, marking a row processed
+  upstream). This example doesn't override it -- Conduit's own
+  position-based resume (via `open(position)`) is enough for an HTTP
+  polling source with no upstream ack concept.
+- Build a standalone, directly-executable artifact for this connector with
+  `conduit-connector-sdk build examples/http-poll-source -o http-poll-source`
+  -- see the root [`README.md`](../../README.md#building-a-standalone-connector-artifact)
+  for why this is required (not just convenient) for Conduit to launch it.

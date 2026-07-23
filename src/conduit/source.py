@@ -17,12 +17,16 @@ import contextlib
 from collections.abc import AsyncIterator, Mapping
 from typing import Any, Generic, TypeVar
 
+import grpc
+import grpc.aio
+import pydantic
+
 import conduit._grpc  # noqa: F401  -- sets up sys.path, see conduit._grpc.__init__
 from conduit._dispatch import invoke
 from conduit._grpc.adapters import config_map_from_proto, record_to_proto
 from conduit._introspect import resolve_config_class
 from conduit.config import BaseConfig
-from conduit.errors import BackoffRetry
+from conduit.errors import BackoffRetry, format_validation_error
 from conduit.record import Record
 from connector.v2 import source_pb2, source_pb2_grpc
 
@@ -117,6 +121,14 @@ class Source(abc.ABC, Generic[ConfigT]):
         :class:`_SourceServicer._consume_acks`, which is the sole caller),
         never speculatively when a record is merely produced.
 
+        **You don't need to override this** unless you also need to
+        acknowledge against the source system itself -- e.g. committing a
+        Kafka consumer offset, deleting a message from a queue, or marking
+        a row processed in an upstream system. Conduit's own position
+        tracking (via what ``read()``/``open()`` return and resume from)
+        works correctly with the no-op default; most connectors never
+        override ``ack()``.
+
         Args:
             position: the acknowledged record's position.
         """
@@ -126,7 +138,7 @@ class Source(abc.ABC, Generic[ConfigT]):
         """Called once, after the read loop stops, before process exit. Default: no-op."""
         return None
 
-    async def lifecycle_on_created(self, config: Mapping[str, str]) -> None:
+    async def on_created(self, config: Mapping[str, str]) -> None:
         """Called once, the first time this connector instance is ever run. Default: no-op.
 
         Args:
@@ -136,7 +148,7 @@ class Source(abc.ABC, Generic[ConfigT]):
         """
         return None
 
-    async def lifecycle_on_updated(
+    async def on_updated(
         self, config_before: Mapping[str, str], config_after: Mapping[str, str]
     ) -> None:
         """Called when the connector's configuration changed since the last run. Default: no-op.
@@ -147,7 +159,7 @@ class Source(abc.ABC, Generic[ConfigT]):
         """
         return None
 
-    async def lifecycle_on_deleted(self, config: Mapping[str, str]) -> None:
+    async def on_deleted(self, config: Mapping[str, str]) -> None:
         """Called once, when this connector instance was deleted. Default: no-op.
 
         Args:
@@ -224,10 +236,25 @@ class _SourceServicer(source_pb2_grpc.SourcePluginServicer):
         self._last_position: bytes = b""
 
     async def Configure(
-        self, request: source_pb2.Source.Configure.Request, context: object
+        self,
+        request: source_pb2.Source.Configure.Request,
+        context: grpc.aio.ServicerContext[Any, Any],
     ) -> source_pb2.Source.Configure.Response:
-        """Validate and store the plugin's config. See proto doc comment for RPC semantics."""
-        config = self._config_cls.model_validate(config_map_from_proto(request.config))
+        """Validate and store the plugin's config. See proto doc comment for RPC semantics.
+
+        A ``pydantic.ValidationError`` is caught explicitly and turned into
+        an ``INVALID_ARGUMENT`` status with a per-field detail message
+        (:func:`~conduit.errors.format_validation_error`) -- per
+        ``CLAUDE.md``'s "errors are API" standard, an author should see
+        exactly which field failed and why, not ``grpc.aio``'s generic
+        "Unexpected <exception class>: ..." ``UNKNOWN``-status wrapping of
+        an uncaught exception.
+        """
+        try:
+            config = self._config_cls.model_validate(config_map_from_proto(request.config))
+        except pydantic.ValidationError as exc:
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, format_validation_error(exc))
+            raise  # pragma: no cover -- abort() never returns; unreachable, satisfies mypy
         await invoke(self._source.configure, config)
         return source_pb2.Source.Configure.Response()
 
@@ -320,7 +347,7 @@ class _SourceServicer(source_pb2_grpc.SourcePluginServicer):
         self, request: source_pb2.Source.Lifecycle.OnCreated.Request, context: object
     ) -> source_pb2.Source.Lifecycle.OnCreated.Response:
         """Dispatch the connector's first-run lifecycle hook."""
-        await invoke(self._source.lifecycle_on_created, config_map_from_proto(request.config))
+        await invoke(self._source.on_created, config_map_from_proto(request.config))
         return source_pb2.Source.Lifecycle.OnCreated.Response()
 
     async def LifecycleOnUpdated(
@@ -328,7 +355,7 @@ class _SourceServicer(source_pb2_grpc.SourcePluginServicer):
     ) -> source_pb2.Source.Lifecycle.OnUpdated.Response:
         """Dispatch the connector's config-changed lifecycle hook."""
         await invoke(
-            self._source.lifecycle_on_updated,
+            self._source.on_updated,
             config_map_from_proto(request.config_before),
             config_map_from_proto(request.config_after),
         )
@@ -338,7 +365,7 @@ class _SourceServicer(source_pb2_grpc.SourcePluginServicer):
         self, request: source_pb2.Source.Lifecycle.OnDeleted.Request, context: object
     ) -> source_pb2.Source.Lifecycle.OnDeleted.Response:
         """Dispatch the connector's deleted lifecycle hook."""
-        await invoke(self._source.lifecycle_on_deleted, config_map_from_proto(request.config))
+        await invoke(self._source.on_deleted, config_map_from_proto(request.config))
         return source_pb2.Source.Lifecycle.OnDeleted.Response()
 
 
