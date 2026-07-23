@@ -49,7 +49,7 @@ src/conduit/
   serve.py              # handshake + gRPC server bootstrap
   _handshake.py          # magic cookie, protocol negotiation, stdout line
   _grpc/                  # generated protobuf/grpc stubs (buf generate output)
-  testing/                 # acceptance-test harness (fast-follow)
+  testing/                 # acceptance-test harness (acceptance.py, fixtures.py)
 examples/http-poll-source/  # worked example connector
 docs/design/                 # design docs for this repo
 tests/                         # unit tests

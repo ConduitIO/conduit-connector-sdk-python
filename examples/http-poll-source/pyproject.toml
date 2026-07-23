@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "http-poll-source"
+version = "0.1.0"
+description = "Example Conduit source connector: polls an HTTP endpoint for new rows."
+requires-python = ">=3.11"
+# This mirrors what `conduit connector new --lang python` will scaffold
+# (Phase 3, design doc §3/§4) -- a standalone connector project depending
+# on the published `conduit-connector-sdk` package. Pinned as a local path
+# dependency here since this example lives inside the SDK's own repo and is
+# exercised by the SDK's own test suite (../../tests/test_example_http_poll_source.py),
+# not published to PyPI itself.
+dependencies = [
+    "conduit-connector-sdk",
+    "httpx>=0.27,<1",
+]
+
+[tool.uv.sources]
+conduit-connector-sdk = { path = "../..", editable = true }
