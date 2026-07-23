@@ -13,7 +13,10 @@ runtime, so this module introspects a model directly -- no codegen, no
 from __future__ import annotations
 
 import datetime
+import re
+from collections.abc import Mapping
 from dataclasses import dataclass
+from fractions import Fraction
 from typing import Any, Literal, get_args, get_origin
 
 import annotated_types
@@ -72,6 +75,38 @@ class BaseConfig(pydantic.BaseModel):
         """
         return to_parameters(cls)
 
+    @pydantic.model_validator(mode="before")
+    @classmethod
+    def _parse_go_durations_before_validation(cls, data: Any) -> Any:
+        """Parse Go-duration-syntax strings for ``timedelta``-typed fields.
+
+        The ``Configure`` RPC's config map is always ``map<string, string>``
+        on the wire (see the wire contract facts) -- pydantic v2 has no
+        built-in support for Go's ``"5s"``/``"1h30m"`` duration syntax (it
+        understands ISO-8601 durations and bare numeric seconds, not this).
+        This ``model_validator(mode="before")`` runs ahead of pydantic's own
+        field validation and converts any string value destined for a
+        ``datetime.timedelta``-typed field into an actual ``timedelta`` via
+        :func:`parse_go_duration`, so the rest of validation proceeds
+        exactly as if a real ``timedelta`` had been passed in. Symmetric
+        with :func:`format_go_duration`, used by :func:`to_parameters` to
+        serialize a ``timedelta`` default for the ``Specify`` RPC -- see
+        that function for the exact wire format both sides agree on.
+
+        Non-string values (e.g. an author constructing the model directly
+        with a real ``timedelta``, as in tests) pass through unchanged.
+        """
+        if not isinstance(data, Mapping):
+            return data
+        converted = dict(data)
+        for name, info in cls.model_fields.items():
+            if _unwrap_optional(info.annotation) is not datetime.timedelta:
+                continue
+            value = converted.get(name)
+            if isinstance(value, str):
+                converted[name] = parse_go_duration(value)
+        return converted
+
 
 @dataclass(slots=True)
 class Specification:
@@ -110,23 +145,29 @@ def to_parameters(config_cls: type[BaseConfig]) -> dict[str, _parameter_pb2.Para
       pydantic's ``gt``/``lt`` exactly).
     - ``ge=``/``le=`` -> **approximated** as ``TYPE_GREATER_THAN``/
       ``TYPE_LESS_THAN`` by nudging the boundary so the declared value
-      itself still validates: for ``int``-typed fields this is exact
-      (boundary ``- 1``/``+ 1``); for ``float``-typed fields this uses a
-      small (``1e-9``) epsilon nudge, which is an approximation, not exact
-      -- see :data:`_FLOAT_BOUNDARY_EPSILON`. Documented here rather than
+      itself still validates: for ``int``-typed (and ``timedelta``-typed --
+      both are fundamentally discrete, integer-microsecond-resolution
+      types) fields this is exact (boundary ``- 1``/``+ 1`` unit); for
+      ``float``-typed fields this uses a small (``1e-9``) epsilon nudge,
+      which is an approximation, not exact -- see
+      :data:`_FLOAT_BOUNDARY_EPSILON`. Documented here rather than
       silently producing a subtly-wrong validation.
     - ``Literal[...]`` -> one ``Validation.TYPE_INCLUSION`` entry per
       literal value (``Parameter.validations`` is ``repeated Validation``,
       matching the Go SDK's shape).
     - ``pattern=`` -> ``Validation.TYPE_REGEX``.
+    - ``datetime.timedelta`` -> ``Parameter.Type.TYPE_DURATION``, with the
+      default (if any) serialized via :func:`format_go_duration` into Go's
+      ``time.Duration.String()`` syntax (``"5s"``, ``"1h30m"``, ``"500ms"``,
+      not ISO-8601). :class:`BaseConfig`'s ``model_validator`` parses that
+      same syntax back (:func:`parse_go_duration`) when the ``Configure``
+      RPC's string config map arrives -- see that validator's docstring.
+      This closes what was previously an open A-gap (a plain
+      ``NotImplementedError``); see git history for the prior wording if
+      you're looking for why this changed.
 
-    **Explicitly not attempted (open A-gaps, design doc §2.2, non-blocking
-    for Phase 1):**
+    **Still an open A-gap, non-blocking for Phase 1:**
 
-    - ``Parameter.Type.TYPE_DURATION`` (Go's ``"5s"``-style duration
-      strings, not ISO-8601) has no pydantic-native mapping. A field typed
-      ``datetime.timedelta`` raises ``NotImplementedError`` rather than
-      guessing at a wrong mapping.
     - ``Validation.Type.TYPE_EXCLUSION`` has no pydantic-native constraint
       to introspect. A field requesting it via
       ``Field(json_schema_extra={"exclusion": [...]})`` raises
@@ -141,21 +182,13 @@ def to_parameters(config_cls: type[BaseConfig]) -> dict[str, _parameter_pb2.Para
         ``Specifier.Specify.Response.source_params``/``destination_params``.
 
     Raises:
-        NotImplementedError: if a field requests ``TYPE_DURATION`` or
-            ``TYPE_EXCLUSION`` semantics (see above).
+        NotImplementedError: if a field requests ``TYPE_EXCLUSION``
+            semantics (see above).
     """
     return {name: _field_to_parameter(name, info) for name, info in config_cls.model_fields.items()}
 
 
 def _field_to_parameter(name: str, info: FieldInfo) -> _parameter_pb2.Parameter:
-    if info.annotation in (datetime.timedelta,):
-        raise NotImplementedError(
-            f"config field {name!r}: `datetime.timedelta` (duration) has no "
-            "pydantic-native mapping to config.Parameter.TYPE_DURATION yet -- "
-            "open A-gap, docs/design/20260707-python-connector-sdk.md §2.2. "
-            "Use a plain int (milliseconds) or str field with duration "
-            "semantics documented in the field description instead."
-        )
     extra = info.json_schema_extra if isinstance(info.json_schema_extra, dict) else {}
     if "exclusion" in extra:
         raise NotImplementedError(
@@ -177,10 +210,14 @@ def _field_to_parameter(name: str, info: FieldInfo) -> _parameter_pb2.Parameter:
         )
 
     is_int = param_type == _parameter_pb2.Parameter.TYPE_INT
-    validations.extend(_constraint_validations(info, is_int=is_int))
+    is_duration = param_type == _parameter_pb2.Parameter.TYPE_DURATION
+    validations.extend(_constraint_validations(info, is_int=is_int, is_duration=is_duration))
 
     if info.is_required():
         default = ""
+    elif is_duration:
+        default_value = info.get_default(call_default_factory=True)
+        default = "" if default_value is None else format_go_duration(default_value)
     else:
         default = _format_default(info.get_default(call_default_factory=True))
 
@@ -234,6 +271,8 @@ def _resolve_type(annotation: Any) -> _ParamTypeAndLiterals:
         return _parameter_pb2.Parameter.TYPE_FLOAT, ()
     if annotation is str:
         return _parameter_pb2.Parameter.TYPE_STRING, ()
+    if annotation is datetime.timedelta:
+        return _parameter_pb2.Parameter.TYPE_DURATION, ()
 
     # Unknown/unsupported annotation (e.g. a nested BaseModel, a custom
     # type): fall back to TYPE_STRING. This is a deliberate, documented
@@ -243,35 +282,39 @@ def _resolve_type(annotation: Any) -> _ParamTypeAndLiterals:
     return _parameter_pb2.Parameter.TYPE_STRING, ()
 
 
-def _constraint_validations(info: FieldInfo, *, is_int: bool) -> list[_parameter_pb2.Validation]:
+def _constraint_validations(
+    info: FieldInfo, *, is_int: bool, is_duration: bool = False
+) -> list[_parameter_pb2.Validation]:
     validations: list[_parameter_pb2.Validation] = []
     for constraint in info.metadata:
         if isinstance(constraint, annotated_types.Gt):
             validations.append(
                 _parameter_pb2.Validation(
                     type=_parameter_pb2.Validation.TYPE_GREATER_THAN,
-                    value=str(constraint.gt),
+                    value=_format_bound(constraint.gt, is_duration=is_duration),
                 )
             )
         elif isinstance(constraint, annotated_types.Lt):
             validations.append(
                 _parameter_pb2.Validation(
                     type=_parameter_pb2.Validation.TYPE_LESS_THAN,
-                    value=str(constraint.lt),
+                    value=_format_bound(constraint.lt, is_duration=is_duration),
                 )
             )
         elif isinstance(constraint, annotated_types.Ge):
+            ge_value = _approximate_ge_as_gt(constraint.ge, is_int=is_int, is_duration=is_duration)
             validations.append(
                 _parameter_pb2.Validation(
                     type=_parameter_pb2.Validation.TYPE_GREATER_THAN,
-                    value=_approximate_ge_as_gt(constraint.ge, is_int=is_int),
+                    value=ge_value,
                 )
             )
         elif isinstance(constraint, annotated_types.Le):
+            le_value = _approximate_le_as_lt(constraint.le, is_int=is_int, is_duration=is_duration)
             validations.append(
                 _parameter_pb2.Validation(
                     type=_parameter_pb2.Validation.TYPE_LESS_THAN,
-                    value=_approximate_le_as_lt(constraint.le, is_int=is_int),
+                    value=le_value,
                 )
             )
         else:
@@ -285,31 +328,50 @@ def _constraint_validations(info: FieldInfo, *, is_int: bool) -> list[_parameter
     return validations
 
 
-def _approximate_ge_as_gt(ge: Any, *, is_int: bool) -> str:
+def _format_bound(value: Any, *, is_duration: bool) -> str:
+    """Format an exact (``gt=``/``lt=``) bound value for the wire.
+
+    ``timedelta`` bounds use :func:`format_go_duration` (Go duration
+    syntax); everything else uses plain ``str()``.
+    """
+    if is_duration:
+        return format_go_duration(value)
+    return str(value)
+
+
+def _approximate_ge_as_gt(ge: Any, *, is_int: bool, is_duration: bool = False) -> str:
     """Approximate an inclusive ``ge=`` bound as the wire's exclusive ``gt``.
 
     ``ge`` is typed ``Any`` because ``annotated_types.Ge.ge`` is itself
     typed against a ``SupportsGe`` structural protocol, not a concrete
     numeric type -- in practice pydantic only ever populates it from
-    ``Field(ge=...)``, which authors pass an ``int``/``float``.
+    ``Field(ge=...)``, which authors pass an ``int``/``float``/``timedelta``.
 
-    Exact for ``int``-typed fields (``ge - 1`` admits exactly the same
-    integers as ``ge`` would inclusively). For ``float``-typed fields this
-    nudges the boundary down by :data:`_FLOAT_BOUNDARY_EPSILON`, which is an
-    approximation: values within that epsilon of ``ge`` are handled
-    correctly, but this is not bit-exact inclusive-boundary semantics.
+    Exact for ``int``-typed **and** ``timedelta``-typed fields (both are
+    fundamentally discrete types at the resolution that matters here --
+    whole integers, or whole microseconds -- so ``ge - 1 unit`` admits
+    exactly the same values ``ge`` would inclusively). For ``float``-typed
+    fields this nudges the boundary down by :data:`_FLOAT_BOUNDARY_EPSILON`,
+    which is an approximation: values within that epsilon of ``ge`` are
+    handled correctly, but this is not bit-exact inclusive-boundary
+    semantics.
     """
+    if is_duration:
+        return format_go_duration(ge - datetime.timedelta(microseconds=1))
     if is_int:
         return str(int(ge) - 1)
     return repr(float(ge) - _FLOAT_BOUNDARY_EPSILON)
 
 
-def _approximate_le_as_lt(le: Any, *, is_int: bool) -> str:
+def _approximate_le_as_lt(le: Any, *, is_int: bool, is_duration: bool = False) -> str:
     """Approximate an inclusive ``le=`` bound as the wire's exclusive ``lt``.
 
     See :func:`_approximate_ge_as_gt` for why ``le`` is typed ``Any`` --
-    exact for ``int``, epsilon-nudged approximation for ``float``.
+    exact for ``int``/``timedelta``, epsilon-nudged approximation for
+    ``float``.
     """
+    if is_duration:
+        return format_go_duration(le + datetime.timedelta(microseconds=1))
     if is_int:
         return str(int(le) + 1)
     return repr(float(le) + _FLOAT_BOUNDARY_EPSILON)
@@ -334,9 +396,156 @@ def _format_default(value: Any) -> str:
     return str(value)
 
 
+# Go duration units, ordered by microsecond magnitude, smallest first --
+# used only by the parser below (the formatter picks units explicitly).
+# `Fraction` keeps arithmetic exact (no float rounding) while accumulating
+# a parsed duration string's components before the final round-to-nearest-
+# microsecond conversion into a `datetime.timedelta` (which itself has no
+# finer resolution than microseconds -- matching Go's `ns` precision
+# exactly isn't possible in a stdlib `timedelta`, and isn't needed for
+# connector config durations).
+_GO_DURATION_UNIT_TO_MICROSECONDS: dict[str, Fraction] = {
+    "ns": Fraction(1, 1000),
+    "us": Fraction(1),
+    "µs": Fraction(1),  # µs, Go's own preferred spelling
+    "ms": Fraction(1000),
+    "s": Fraction(1_000_000),
+    "m": Fraction(60_000_000),
+    "h": Fraction(3_600_000_000),
+}
+_GO_DURATION_COMPONENT_RE = re.compile(r"([0-9]*\.?[0-9]+)(ns|µs|us|ms|s|m|h)")
+
+
+def format_go_duration(value: datetime.timedelta) -> str:
+    """Render a ``timedelta`` as a Go ``time.Duration.String()``-syntax string.
+
+    Matches Go's own formatting rules for the common cases this SDK's
+    config fields need (design doc §2.2's Duration A-gap, now closed):
+    microseconds/milliseconds/seconds for sub-minute durations, and
+    ``[Xh][Ym]Zs`` for durations of a minute or more (hours omitted if
+    zero; minutes shown whenever hours are, or whenever there are any,
+    matching e.g. ``time.Duration(time.Hour).String() == "1h0m0s"`` and
+    ``(90 * time.Second).String() == "1m30s"``). Round-trips exactly
+    through :func:`parse_go_duration` for any value a ``timedelta`` can
+    represent (microsecond resolution).
+
+    Args:
+        value: the duration to format.
+
+    Returns:
+        A Go-duration-syntax string, e.g. ``"5s"``, ``"1h30m"``... except
+        this function always includes a trailing seconds component for
+        the ``>= 1 minute`` branch (``"1h30m0s"``, not ``"1h30m"``) --
+        matching Go's own ``String()`` output exactly, which always prints
+        seconds.
+    """
+    total_us = value.days * 86_400_000_000 + value.seconds * 1_000_000 + value.microseconds
+    if total_us == 0:
+        return "0s"
+
+    sign = "-" if total_us < 0 else ""
+    total_us = abs(total_us)
+
+    if total_us < 1_000:
+        return f"{sign}{total_us}µs"
+    if total_us < 1_000_000:
+        return f"{sign}{_format_scaled(total_us, 1_000)}ms"
+    if total_us < 60_000_000:
+        return f"{sign}{_format_scaled(total_us, 1_000_000)}s"
+
+    total_seconds, sub_second_us = divmod(total_us, 1_000_000)
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    seconds_us = seconds * 1_000_000 + sub_second_us
+
+    parts: list[str] = []
+    if hours:
+        parts.append(f"{hours}h")
+    if hours or minutes:
+        parts.append(f"{minutes}m")
+    parts.append(f"{_format_scaled(seconds_us, 1_000_000)}s")
+    return sign + "".join(parts)
+
+
+def _format_scaled(total: int, unit: int) -> str:
+    """Format ``total`` (an integer count of the base unit) scaled by ``unit``.
+
+    E.g. ``_format_scaled(1500, 1000)`` (1500 microseconds, scaled to
+    milliseconds) -> ``"1.5"``. Uses exact integer arithmetic throughout
+    (no floats), so there's no rounding-representation mismatch between
+    what's formatted and what :func:`parse_go_duration` reads back.
+    """
+    whole, rem = divmod(total, unit)
+    if rem == 0:
+        return str(whole)
+    digits = len(str(unit)) - 1
+    frac = str(rem).rjust(digits, "0").rstrip("0")
+    return f"{whole}.{frac}"
+
+
+def parse_go_duration(value: str) -> datetime.timedelta:
+    """Parse a Go ``time.Duration``-syntax string into a ``timedelta``.
+
+    Accepts a signed sequence of ``<number><unit>`` components (each
+    number may have a fractional part), e.g. ``"5s"``, ``"1h30m"``,
+    ``"500ms"``, ``"-1.5h"``, ``"2h45m30s"``, ``"90s"``. Units: ``ns``,
+    ``us``/``µs``, ``ms``, ``s``, ``m``, ``h`` -- matching Go's
+    ``ParseDuration``. A bare ``"0"`` (no unit) is accepted as zero,
+    matching Go. Arithmetic is done with exact ``fractions.Fraction``
+    values (not floats) until the final round to the nearest whole
+    microsecond, the finest resolution ``datetime.timedelta`` supports.
+
+    Args:
+        value: a Go-duration-syntax string.
+
+    Returns:
+        The equivalent ``timedelta``.
+
+    Raises:
+        ValueError: if ``value`` isn't valid Go duration syntax.
+    """
+    original = value
+    s = value.strip()
+    if not s:
+        raise ValueError(f"invalid duration {original!r}: empty string")
+
+    sign = 1
+    if s[0] in "+-":
+        sign = -1 if s[0] == "-" else 1
+        s = s[1:]
+
+    if s == "0":
+        return datetime.timedelta(0)
+
+    total = Fraction(0)
+    pos = 0
+    matched_any = False
+    for match in _GO_DURATION_COMPONENT_RE.finditer(s):
+        if match.start() != pos:
+            raise ValueError(
+                f"invalid duration {original!r}: unexpected characters at "
+                f"position {pos} (Go duration syntax, e.g. '5s', '1h30m', '500ms')"
+            )
+        number = Fraction(match.group(1))
+        unit = match.group(2)
+        total += number * _GO_DURATION_UNIT_TO_MICROSECONDS[unit]
+        pos = match.end()
+        matched_any = True
+
+    if not matched_any or pos != len(s):
+        raise ValueError(
+            f"invalid duration {original!r}: does not match Go duration syntax "
+            "(e.g. '5s', '1h30m', '500ms', 'us'/'µs', 'ns')"
+        )
+
+    return datetime.timedelta(microseconds=sign * round(total))
+
+
 __all__ = [
     "BaseConfig",
     "Field",
     "Specification",
+    "format_go_duration",
+    "parse_go_duration",
     "to_parameters",
 ]

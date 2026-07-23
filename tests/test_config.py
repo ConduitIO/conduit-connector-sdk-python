@@ -1,8 +1,10 @@
 """Tests for :mod:`conduit.config` -- ``BaseConfig``/``Field``/``to_parameters``.
 
-Covers the design doc §2.2 mapping rules and its documented A-gaps
-(``TYPE_DURATION``/``TYPE_EXCLUSION`` raise ``NotImplementedError`` rather
-than guessing).
+Covers the design doc §2.2 mapping rules. ``TYPE_DURATION`` (``timedelta``
+fields) is now a real, round-tripping mapping -- see
+``tests/test_go_duration.py`` for the ``format_go_duration``/
+``parse_go_duration`` unit tests specifically. ``TYPE_EXCLUSION`` remains an
+open A-gap and still raises ``NotImplementedError``.
 """
 
 from __future__ import annotations
@@ -41,7 +43,11 @@ class _WithBool(BaseConfig):
 
 
 class _WithDuration(BaseConfig):
-    interval: datetime.timedelta = Field(default=datetime.timedelta(seconds=5))
+    interval: datetime.timedelta = Field(
+        default=datetime.timedelta(seconds=5), description="poll interval"
+    )
+    timeout: datetime.timedelta = Field(description="required timeout, no default")
+    long_wait: datetime.timedelta = Field(default=datetime.timedelta(hours=1, minutes=30))
 
 
 def test_required_field_gets_required_validation() -> None:
@@ -116,10 +122,45 @@ def test_bool_field_maps_to_type_bool_with_lowercase_default() -> None:
     assert param.default == "false"
 
 
-def test_duration_field_raises_not_implemented() -> None:
-    """§2.2's A-gap: TYPE_DURATION has no pydantic-native mapping -- raise, don't guess."""
-    with pytest.raises(NotImplementedError, match=r"TYPE_DURATION|duration"):
-        to_parameters(_WithDuration)
+def test_duration_field_maps_to_type_duration_with_go_syntax_default() -> None:
+    """A ``timedelta`` field maps to ``TYPE_DURATION``; the default is Go-duration syntax."""
+    params = to_parameters(_WithDuration)
+    interval = params["interval"]
+    assert interval.type == parameter_pb2.Parameter.TYPE_DURATION
+    assert interval.default == "5s"
+    assert interval.description == "poll interval"
+
+    long_wait = params["long_wait"]
+    assert long_wait.default == "1h30m0s"
+
+
+def test_duration_field_with_no_default_is_required_and_has_empty_default() -> None:
+    params = to_parameters(_WithDuration)
+    timeout = params["timeout"]
+    assert timeout.type == parameter_pb2.Parameter.TYPE_DURATION
+    assert timeout.default == ""
+    types = [v.type for v in timeout.validations]
+    assert parameter_pb2.Validation.TYPE_REQUIRED in types
+
+
+def test_configure_parses_go_duration_string_config_value() -> None:
+    """The ``Configure`` RPC's string config map parses Go-duration syntax for timedelta fields."""
+    config = _WithDuration.model_validate(
+        {"interval": "10s", "timeout": "1h30m", "long_wait": "2h"}
+    )
+    assert config.interval == datetime.timedelta(seconds=10)
+    assert config.timeout == datetime.timedelta(hours=1, minutes=30)
+    assert config.long_wait == datetime.timedelta(hours=2)
+
+
+def test_direct_construction_with_a_real_timedelta_still_works() -> None:
+    """Non-string (already-``timedelta``) values pass through the before-validator unchanged."""
+    config = _WithDuration(
+        interval=datetime.timedelta(seconds=1),
+        timeout=datetime.timedelta(minutes=5),
+    )
+    assert config.interval == datetime.timedelta(seconds=1)
+    assert config.timeout == datetime.timedelta(minutes=5)
 
 
 def test_exclusion_request_raises_not_implemented() -> None:
