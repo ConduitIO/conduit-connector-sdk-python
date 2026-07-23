@@ -50,6 +50,10 @@ dev = [
     "pytest-asyncio>=0.25,<1",
     "hypothesis>=6.120,<7",
     "grpc-stubs>=1.24,<2",
+    # Type stubs for google.protobuf (e.g. empty_pb2.Empty in serve.py/
+    # _grpc/_controller.py) -- without this, mypy reports "Library stubs
+    # not installed for google.protobuf" under strict mode.
+    "types-protobuf>=6.30,<7",
     # Bounds the hung-event-loop watchdog test (▶ MUST-FIX 3) and the
     # deterministic-shutdown test (▶ MUST-FIX 2) so a regression that makes
     # either hang fails CI promptly instead of hanging the test run itself.

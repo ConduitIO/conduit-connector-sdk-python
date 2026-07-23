@@ -417,14 +417,16 @@ is enough to pick the right oneof branch. **`Data = bytes | Mapping[str, Any]`.*
 ```python
 @dataclass
 class Change:
-    before: Data | None = None   # update/delete only
-    after: Data | None = None    # all ops except delete
+    before: Data | None = None  # update/delete only
+    after: Data | None = None  # all ops except delete
+
 
 class Operation(enum.Enum):
     CREATE = 1
     UPDATE = 2
     DELETE = 3
     SNAPSHOT = 4
+
 
 @dataclass
 class Record:
@@ -548,6 +550,7 @@ metadata is auto-populated.
 
 ```python
 """A minimal Conduit source connector: polls an HTTP endpoint for new rows."""
+
 from __future__ import annotations
 
 import asyncio
