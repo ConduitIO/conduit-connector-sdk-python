@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# Tooling caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.hypothesis/
+htmlcov/
+.coverage
+.coverage.*
+
+# uv
+.uv/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Generated protobuf/grpc stubs are checked in (vendored, see docs/design/) —
+# do NOT ignore src/conduit/_grpc/**, but ignore ad hoc regeneration scratch.
+buf-generate.log
