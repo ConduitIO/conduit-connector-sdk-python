@@ -1,12 +1,16 @@
 name: release
 
-# Manual release process for v0.x, per the v0.19 workstream scope
-# (conduit-v019-plans/workstreams/python-connector-sdk.md §2, item 9):
-# trusted-publisher CI automation to PyPI is an explicit fast-follow, not
-# blocking. This workflow builds and checks the package on a tag push; the
-# actual `pypi-publish` step is intentionally left commented out until the
-# trusted-publisher OIDC setup is done (requires PyPI project configuration
-# DeVaris has not yet performed — do not uncomment without that).
+# Release to PyPI via Trusted Publishing (GitHub OIDC), no API token.
+#
+# The PyPI pending publisher was configured by DeVaris on 2026-08-03
+# (project `conduit-connector-sdk`, owner ConduitIO, repo
+# conduit-connector-sdk-python, workflow release.yml, no environment).
+#
+# NOT YET GA: v0.20 WS2's GA bar is the acceptance suite green in CI plus a
+# first tagged release. The batching and Avro/schema middleware that bar also
+# names are NOT implemented yet (no middleware module exists in src/), so
+# tagging now would publish a package that does not meet its own stated scope.
+# Publishing is wired here so the tag is the only remaining step once it does.
 on:
   push:
     tags: ["v*"]
@@ -15,6 +19,10 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      # Required for Trusted Publishing: mints the OIDC token PyPI verifies
+      # instead of a long-lived API token.
+      id-token: write
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -27,7 +35,7 @@ jobs:
           name: dist
           path: dist/
 
-      # Fast-follow (v0.20, not this workflow's current scope): trusted
-      # publisher OIDC push to PyPI. See docs/design/20260707-python-connector-sdk.md §3.
-      # - name: Publish to PyPI
-      #   uses: pypa/gh-action-pypi-publish@release/v1
+      - name: Publish to PyPI
+        # Tag pushes only -- workflow_dispatch stays a build+check dry run.
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: pypa/gh-action-pypi-publish@release/v1
