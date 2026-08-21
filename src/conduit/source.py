@@ -22,11 +22,12 @@ import grpc.aio
 import pydantic
 
 import conduit._grpc  # noqa: F401  -- sets up sys.path, see conduit._grpc.__init__
+from conduit._batch import BatchConfig, collect_batches, extract_batch_config
 from conduit._dispatch import invoke
 from conduit._grpc.adapters import config_map_from_proto, record_to_proto
 from conduit._introspect import resolve_config_class
 from conduit.config import BaseConfig
-from conduit.errors import BackoffRetry, format_validation_error
+from conduit.errors import BackoffRetry, ConfigValidationError, format_validation_error
 from conduit.record import Record
 from connector.v2 import source_pb2, source_pb2_grpc
 
@@ -234,6 +235,12 @@ class _SourceServicer(source_pb2_grpc.SourcePluginServicer):
         self._stopped_event = asyncio.Event()
         self._run_started = False
         self._last_position: bytes = b""
+        self._batch_config = BatchConfig()
+        """`sdk.batch.size`/`sdk.batch.delay`, set by `Configure` -- see
+        `conduit._batch.extract_batch_config`. Defaults to the disabled
+        (passthrough) config so a servicer driven directly in tests
+        without ever calling `Configure` (see e.g. `tests/test_source.py`)
+        keeps today's exact unbatched, one-record-per-response behavior."""
 
     async def Configure(
         self,
@@ -249,12 +256,26 @@ class _SourceServicer(source_pb2_grpc.SourcePluginServicer):
         exactly which field failed and why, not ``grpc.aio``'s generic
         "Unexpected <exception class>: ..." ``UNKNOWN``-status wrapping of
         an uncaught exception.
+
+        Before that, :func:`~conduit._batch.extract_batch_config` pulls
+        the SDK-owned ``sdk.batch.size``/``sdk.batch.delay`` keys out of
+        the raw map (never part of the connector's own
+        :class:`~conduit.config.BaseConfig` -- see :mod:`conduit._batch`);
+        a malformed value there is surfaced the same way, via
+        :class:`~conduit.errors.ConfigValidationError`.
         """
+        raw = config_map_from_proto(request.config)
         try:
-            config = self._config_cls.model_validate(config_map_from_proto(request.config))
+            batch_config, remaining = extract_batch_config(raw)
+        except ConfigValidationError as exc:
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
+            raise  # pragma: no cover -- abort() never returns; unreachable, satisfies mypy
+        try:
+            config = self._config_cls.model_validate(remaining)
         except pydantic.ValidationError as exc:
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, format_validation_error(exc))
             raise  # pragma: no cover -- abort() never returns; unreachable, satisfies mypy
+        self._batch_config = batch_config
         await invoke(self._source.configure, config)
         return source_pb2.Source.Configure.Response()
 
@@ -278,13 +299,40 @@ class _SourceServicer(source_pb2_grpc.SourcePluginServicer):
         driving the response stream) and a background task consuming
         ``request_iterator`` for incoming acks -- per
         ``grpc.aio``'s native bidi-stream model (design doc §2.1/§1.3).
+
+        **Passthrough (``not self._batch_config.enabled``, the default and
+        today's only behavior before WS2's ``sdk.batch.*`` support):** one
+        record from :meth:`_read_loop` drives exactly one
+        ``Source.Run.Response`` with one record.
+
+        **Batching enabled (``sdk.batch.size > 1`` or ``sdk.batch.delay >
+        0``, see :mod:`conduit._batch`):** :meth:`_read_loop` -- unchanged,
+        still the single serial backoff-aware read loop -- is wrapped by
+        :func:`~conduit._batch.collect_batches`, which groups its records
+        into size/delay-bounded batches; each emitted batch drives one
+        ``Source.Run.Response`` carrying every record in it. This is Go's
+        *fallback* single-record-collection behavior
+        (``sourceWithBatch.collectWithRead``), not its optimized ``ReadN``
+        path -- see the "deliberate divergence" note in
+        :mod:`conduit._batch`'s module docstring for why: this SDK's
+        ``Source`` ABC has no ``read_batch``/``ReadN`` override point yet.
+        Ack handling is unaffected either way -- :meth:`_consume_acks`
+        processes whatever positions Conduit sends back regardless of how
+        records were grouped on the way out.
         """
         self._run_started = True
         ack_task = asyncio.create_task(self._consume_acks(request_iterator))
         try:
-            async for record in self._read_loop():
-                self._last_position = record.position
-                yield source_pb2.Source.Run.Response(records=[record_to_proto(record)])
+            if self._batch_config.enabled:
+                async for batch in collect_batches(self._read_loop(), config=self._batch_config):
+                    self._last_position = batch[-1].position
+                    yield source_pb2.Source.Run.Response(
+                        records=[record_to_proto(r) for r in batch]
+                    )
+            else:
+                async for record in self._read_loop():
+                    self._last_position = record.position
+                    yield source_pb2.Source.Run.Response(records=[record_to_proto(record)])
         finally:
             ack_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):

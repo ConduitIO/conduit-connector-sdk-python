@@ -39,6 +39,7 @@ from google.protobuf import empty_pb2
 from grpc_health.v1 import health, health_pb2, health_pb2_grpc
 
 import conduit._grpc  # noqa: F401  -- sets up sys.path, see conduit._grpc.__init__
+from conduit._batch import sdk_batch_parameters
 from conduit._dispatch import invoke
 from conduit._grpc._controller import build_controller_handler
 from conduit._handshake import (
@@ -338,7 +339,15 @@ async def _build_plugin_server(
         source_pb2_grpc.add_SourcePluginServicer_to_server(  # type: ignore[no-untyped-call]
             source_servicer, server
         )
-        source_params = to_parameters(config_cls)
+        # `sdk.batch.*` is merged in for every connector, matching Go's
+        # `DefaultSourceMiddleware` embedding (paramgen-merged onto every
+        # Go connector's own Specify() params automatically) -- see
+        # `conduit._batch.sdk_batch_parameters`'s docstring. The
+        # connector's own params take precedence in the unlikely event of
+        # a key collision (there isn't one today: `sdk.batch.size`/`.delay`
+        # aren't valid Python identifiers, so no BaseConfig field can ever
+        # be named that).
+        source_params = {**sdk_batch_parameters(), **to_parameters(config_cls)}
         drain = source_servicer.drain
     else:
         assert destination is not None  # narrowed by the xor check above
@@ -348,7 +357,8 @@ async def _build_plugin_server(
         destination_pb2_grpc.add_DestinationPluginServicer_to_server(  # type: ignore[no-untyped-call]
             destination_servicer, server
         )
-        destination_params = to_parameters(config_cls)
+        # See the matching `source_params` comment above.
+        destination_params = {**sdk_batch_parameters(), **to_parameters(config_cls)}
         drain = destination_servicer.drain
 
     specifier_pb2_grpc.add_SpecifierPluginServicer_to_server(  # type: ignore[no-untyped-call]
