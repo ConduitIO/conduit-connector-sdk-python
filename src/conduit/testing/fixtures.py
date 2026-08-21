@@ -57,12 +57,67 @@ def update_record(
 
 
 def delete_record(position: bytes, key: str, before: dict[str, object]) -> Record:
-    """A removed-row record: ``OPERATION_DELETE``, no ``after``."""
+    """A removed-row record: ``OPERATION_DELETE``, no ``after`` -- prior state is captured.
+
+    Contrast with :func:`tombstone_record`: this shape is what most CDC
+    sources actually emit for a delete (Debezium-style "before image"),
+    carrying ``payload.before`` for downstream consumers that want it.
+    """
     return Record(
         position=position,
         operation=Operation.DELETE,
         key={"id": key},
         payload=Change(before=before),
+    )
+
+
+def tombstone_record(position: bytes, key: str) -> Record:
+    """A Kafka-Connect-style tombstone: ``OPERATION_DELETE``, key present, **no payload at all**.
+
+    Distinct from :func:`delete_record` -- a tombstone carries neither
+    ``before`` nor ``after`` (both ``None``, the wire's "absent" ``Data``
+    representation -- see ``conduit._grpc.adapters._data_from_proto_optional``),
+    matching the Kafka Connect/log-compaction convention of "key present,
+    value entirely null" as the deletion marker, rather than a before-image
+    a CDC-style delete carries. One of the three record shapes the
+    acceptance suite's record-shape category exercises (raw, structured,
+    tombstone) -- see ``conduit.testing.acceptance``.
+
+    Args:
+        position: the record's position.
+        key: the record's key (wrapped as ``{"id": key}``, matching this
+            module's other structured-key fixtures).
+    """
+    return Record(
+        position=position,
+        operation=Operation.DELETE,
+        key={"id": key},
+        payload=Change(before=None, after=None),
+    )
+
+
+def raw_record(
+    position: bytes, key: bytes, value: bytes, operation: Operation = Operation.CREATE
+) -> Record:
+    """A record with a raw-``bytes`` key and payload, not the structured (``dict``) shape.
+
+    Every other fixture in this module uses a structured (``dict``) key/
+    value -- this one exists specifically to exercise the ``raw`` record
+    shape (see ``conduit.record.Data``'s two-way ``bytes | Mapping``
+    contract), the counterpart to :func:`create_record`/etc.'s structured
+    shape in the acceptance suite's record-shape category.
+
+    Args:
+        position: the record's position.
+        key: the record's raw-bytes key.
+        value: the raw-bytes payload, used as ``payload.after``.
+        operation: the record's operation; defaults to ``CREATE``.
+    """
+    return Record(
+        position=position,
+        operation=operation,
+        key=key,
+        payload=Change(after=value),
     )
 
 
