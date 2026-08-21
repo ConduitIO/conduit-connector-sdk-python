@@ -57,6 +57,14 @@ Repository = "https://github.com/ConduitIO/conduit-connector-sdk-python"
 Issues = "https://github.com/ConduitIO/conduit-connector-sdk-python/issues"
 
 [project.optional-dependencies]
+# Avro schema support (`conduit.schema`) -- not a core runtime dependency,
+# since most connectors never touch Avro at all. `fastavro` is used because
+# it exposes `schemaless_writer`/`schemaless_reader`: plain, headerless
+# Avro binary encoding with no embedded schema-registry framing, matching
+# exactly what conduit-commons' schema/avro package (a thin wrapper over
+# `hamba/avro/v2`) produces on the wire -- see `conduit/schema.py`'s module
+# docstring for the full wire-compatibility contract and its proof.
+avro = ["fastavro>=1.9,<2"]
 dev = [
     "grpcio-tools>=1.75,<2",
     "ruff>=0.14,<1",

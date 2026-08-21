@@ -1,0 +1,36 @@
+{
+  "_provenance": {
+    "purpose": "Cross-language Avro wire-compatibility fixture for conduit.schema.AvroSchema (WS2). A Python-only round-trip is not evidence of Go interop, so these bytes were produced by an actual Go program using github.com/hamba/avro/v2 -- the exact library conduit-commons' schema/avro package wraps (schema/avro/serde.go: avro.ParseBytes + avro.Marshal/avro.Unmarshal) -- not reimplemented or guessed at from the Avro spec.",
+    "generator_note": "The Go generator program (not checked into this repo) parsed `schema_json` below with avro.ParseBytes, then called avro.Marshal(schema, v) on each case's Go struct value, round-tripping through avro.Unmarshal as a sanity gate before recording the hex output. See tests/test_schema_avro.py for how these bytes are consumed and what each assertion proves.",
+    "array_framing_note": "hamba/avro encodes the non-empty `tags` array (case with_note) using Avro's negative-block-count + explicit-byte-size framing (spec-legal, used for reader skip-ahead); fastavro's schemaless_writer instead uses the plain positive-count framing (also spec-legal). Both were verified bidirectionally decodable during golden generation (fastavro decoded the Go bytes; a companion Go decoder program decoded fastavro's own encoding of the same value) even though the two encoders' output isn't byte-identical for that one field. The `null_note` case has an empty array (`tags: []`), where this ambiguity doesn't arise (block count 0 either way), and is fully byte-exact in both directions -- see test_schema_avro.py's assertions."
+  },
+  "schema_json": "{\n  \"type\": \"record\",\n  \"name\": \"OpenCDCPayload\",\n  \"namespace\": \"io.conduit.example\",\n  \"fields\": [\n    {\"name\": \"id\", \"type\": \"long\"},\n    {\"name\": \"name\", \"type\": \"string\"},\n    {\"name\": \"active\", \"type\": \"boolean\"},\n    {\"name\": \"score\", \"type\": \"double\"},\n    {\"name\": \"tags\", \"type\": {\"type\": \"array\", \"items\": \"string\"}},\n    {\"name\": \"note\", \"type\": [\"null\", \"string\"], \"default\": null}\n  ]\n}",
+  "cases": [
+    {
+      "name": "with_note",
+      "value": {
+        "id": 42,
+        "name": "widget",
+        "active": true,
+        "score": 3.14159,
+        "tags": ["a", "b", "c"],
+        "note": "hello from go"
+      },
+      "go_avro_hex": "540c776964676574016e861bf0f9210940050c02610262026300021a68656c6c6f2066726f6d20676f",
+      "byte_exact_encode_both_directions": false
+    },
+    {
+      "name": "null_note",
+      "value": {
+        "id": 7,
+        "name": "gadget",
+        "active": false,
+        "score": -1.5,
+        "tags": [],
+        "note": null
+      },
+      "go_avro_hex": "0e0c67616467657400000000000000f8bf0000",
+      "byte_exact_encode_both_directions": true
+    }
+  ]
+}
