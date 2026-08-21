@@ -9,9 +9,19 @@ itself impossible (``ValueError``), not merely documented.
 
 from __future__ import annotations
 
+import pydantic
 import pytest
 
-from conduit.errors import BackoffRetry, BatchWriteError, ConnectorError
+from conduit.config import BaseConfig
+from conduit.errors import (
+    BackoffRetry,
+    BatchWriteError,
+    ConfigFieldError,
+    ConfigValidationError,
+    ConnectorError,
+    config_field_errors,
+    format_validation_error,
+)
 
 
 class TestBatchWriteErrorWrittenPrefix:
@@ -134,3 +144,84 @@ class TestConnectorError:
 
     def test_code_is_stored_when_given(self) -> None:
         assert ConnectorError("boom", code="E001").code == "E001"
+
+
+class _Config(BaseConfig):
+    url: str
+    count: int = 1
+
+
+class TestConfigFieldErrors:
+    """Stable, pydantic-documented error `type` codes -- the WS2 "assert on codes" surface."""
+
+    def test_missing_required_field_has_stable_missing_code(self) -> None:
+        with pytest.raises(pydantic.ValidationError) as exc_info:
+            _Config.model_validate({})
+        errors = config_field_errors(exc_info.value)
+        assert len(errors) == 1
+        assert errors[0].field == "url"
+        assert errors[0].code == "missing"
+
+    def test_wrong_type_field_has_stable_type_code(self) -> None:
+        with pytest.raises(pydantic.ValidationError) as exc_info:
+            _Config.model_validate({"url": "x", "count": "not-an-int"})
+        errors = config_field_errors(exc_info.value)
+        assert len(errors) == 1
+        assert errors[0].field == "count"
+        assert errors[0].code == "int_parsing"
+
+    def test_multiple_errors_are_all_reported(self) -> None:
+        with pytest.raises(pydantic.ValidationError) as exc_info:
+            _Config.model_validate({"count": "nope"})
+        errors = config_field_errors(exc_info.value)
+        fields = {e.field for e in errors}
+        assert fields == {"url", "count"}
+
+    def test_each_error_is_a_config_field_error(self) -> None:
+        with pytest.raises(pydantic.ValidationError) as exc_info:
+            _Config.model_validate({})
+        for error in config_field_errors(exc_info.value):
+            assert isinstance(error, ConfigFieldError)
+
+
+class TestFormatValidationErrorStillMatchesConfigFieldErrors:
+    """`format_validation_error`'s text and `config_field_errors`'s codes share one source."""
+
+    def test_formatted_text_mentions_every_field_config_field_errors_reports(self) -> None:
+        with pytest.raises(pydantic.ValidationError) as exc_info:
+            _Config.model_validate({"count": "nope"})
+        exc = exc_info.value
+        text = format_validation_error(exc)
+        for error in config_field_errors(exc):
+            assert error.field in text
+
+
+class TestConfigValidationError:
+    def test_requires_at_least_one_error(self) -> None:
+        with pytest.raises(ValueError, match="non-empty"):
+            ConfigValidationError([])
+
+    def test_is_a_connector_error(self) -> None:
+        err = ConfigValidationError([ConfigFieldError(field="x", code="c", message="m")])
+        assert isinstance(err, ConnectorError)
+
+    def test_str_mentions_every_field_and_message(self) -> None:
+        err = ConfigValidationError(
+            [
+                ConfigFieldError(field="url", code="missing", message="Field required"),
+                ConfigFieldError(field="count", code="int_parsing", message="not a valid int"),
+            ]
+        )
+        text = str(err)
+        assert "url" in text
+        assert "Field required" in text
+        assert "count" in text
+        assert "not a valid int" in text
+
+    def test_errors_attribute_is_preserved_in_order(self) -> None:
+        errors = [
+            ConfigFieldError(field="a", code="c1", message="m1"),
+            ConfigFieldError(field="b", code="c2", message="m2"),
+        ]
+        err = ConfigValidationError(errors)
+        assert err.errors == errors
