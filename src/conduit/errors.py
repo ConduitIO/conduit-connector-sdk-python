@@ -12,6 +12,7 @@ structurally unrepresentable instead.
 from __future__ import annotations
 
 from collections.abc import Mapping, Set
+from dataclasses import dataclass
 
 import pydantic
 
@@ -45,6 +46,125 @@ class ConnectorError(Exception):
         self.code = code
 
 
+@dataclass(slots=True, frozen=True)
+class ConfigFieldError:
+    """One field-level config validation failure, with a stable machine-readable code.
+
+    Returned by :func:`config_field_errors`/carried by
+    :class:`ConfigValidationError`, and the thing WS2's "assert on codes,
+    not on message text" requirement is actually about: :attr:`code` is
+    the identifier a test (or an author's own error-handling code) should
+    branch or assert on, never :attr:`message`, which is free-text and not
+    guaranteed stable across SDK versions.
+
+    Attributes:
+        field: the config key this error concerns (a pydantic field-path
+            string like ``"url"``/``"nested.field"``, or one of the SDK's
+            own injected keys, e.g. ``"sdk.batch.size"``).
+        code: a stable identifier for *what kind* of validation failed.
+            Two sources, both stable, neither invented for this SDK
+            specifically:
+
+            - For fields validated through the connector's own
+              :class:`~conduit.config.BaseConfig`: pydantic v2's own
+              documented ``error["type"]`` identifier (e.g. ``"missing"``,
+              ``"greater_than_equal"``, ``"string_type"``,
+              ``"literal_error"``) -- see
+              https://docs.pydantic.dev/latest/errors/validation_errors/.
+              Pydantic documents these as part of its public API and
+              guarantees they don't change silently between minor
+              versions, which is what makes them safe to assert on here
+              instead of reimplementing an equivalent taxonomy.
+            - For the two ``sdk.batch.*`` keys this SDK injects and parses
+              itself, ahead of the connector's own pydantic model (see
+              :mod:`conduit._batch`): :data:`INVALID_BATCH_SIZE_CODE`/
+              :data:`INVALID_BATCH_DELAY_CODE`.
+        message: human-readable detail -- what actually crosses the wire
+            as the gRPC ``INVALID_ARGUMENT`` status detail (via
+            :func:`format_validation_error`). Free text; do not assert on
+            it.
+    """
+
+    field: str
+    code: str
+    message: str
+
+
+INVALID_BATCH_SIZE_CODE = "invalid_batch_size"
+"""Stable :class:`ConfigFieldError` code for a malformed ``sdk.batch.size``.
+
+See :mod:`conduit._batch`.
+"""
+
+INVALID_BATCH_DELAY_CODE = "invalid_batch_delay"
+"""Stable :class:`ConfigFieldError` code for a malformed ``sdk.batch.delay``.
+
+See :mod:`conduit._batch`.
+"""
+
+
+class ConfigValidationError(ConnectorError):
+    """Raised when a ``Configure`` RPC's config map fails validation.
+
+    Carries an exhaustive :attr:`errors` list -- one :class:`ConfigFieldError`
+    per failing field -- so callers (this SDK's own ``Configure`` handlers,
+    the acceptance harness, or a connector author's own test) can assert on
+    stable :attr:`~ConfigFieldError.code` values rather than parsing
+    :func:`format_validation_error`'s free-text output.
+
+    **Honesty note, consistent with :class:`ConnectorError`'s existing
+    ``code`` docstring:** unlike ``config.Parameter``'s ``Validation.Type``
+    (an actual wire enum defined in ``conduit-connector-protocol``), the
+    codes on this exception's :attr:`errors` are **not** transmitted over
+    the wire today -- ``Configure`` still aborts with only a formatted
+    string detail (:func:`format_validation_error`). This class exists so
+    this SDK's own code and its authors' tests can assert on stable
+    identifiers in-process, not to claim a new wire contract that doesn't
+    exist yet (the connector protocol has no stable plugin-originated
+    error-code wire slot at all currently -- see :class:`ConnectorError`).
+    """
+
+    def __init__(self, errors: list[ConfigFieldError]) -> None:
+        """Initialize with the exhaustive list of field-level failures.
+
+        Args:
+            errors: one entry per failing config field. Must be non-empty
+                -- a ``ConfigValidationError`` with no errors would be a
+                contradiction (nothing failed, so nothing should have been
+                raised).
+        """
+        if not errors:
+            raise ValueError("ConfigValidationError: `errors` must be non-empty")
+        self.errors = errors
+        lines = [f"invalid config ({len(errors)} error(s)):"]
+        lines.extend(f"  {e.field}: {e.message}" for e in errors)
+        super().__init__("\n".join(lines))
+
+
+def config_field_errors(exc: pydantic.ValidationError) -> list[ConfigFieldError]:
+    """Extract stable-coded :class:`ConfigFieldError` entries from a pydantic error.
+
+    The single conversion site between pydantic's own error shape and this
+    SDK's :class:`ConfigFieldError` -- both :func:`format_validation_error`
+    (the wire-facing string) and any caller wanting the stable ``.code``
+    values (e.g. :class:`ConfigValidationError`, or a test asserting on a
+    specific field's code) go through this function, so the two never drift
+    apart.
+
+    Args:
+        exc: the validation error to convert.
+
+    Returns:
+        One :class:`ConfigFieldError` per pydantic error, in the same
+        order ``exc.errors()`` reports them.
+    """
+    errors = []
+    for error in exc.errors(include_url=False):
+        loc = ".".join(str(part) for part in error["loc"]) or "<root>"
+        errors.append(ConfigFieldError(field=loc, code=error["type"], message=error["msg"]))
+    return errors
+
+
 def format_validation_error(exc: pydantic.ValidationError) -> str:
     """Format a pydantic ``ValidationError`` as a concise, per-field detail string.
 
@@ -68,10 +188,9 @@ def format_validation_error(exc: pydantic.ValidationError) -> str:
         noise in a gRPC status detail, not useful to an operator reading a
         pipeline's error log.
     """
-    lines = [f"invalid config ({exc.error_count()} error(s)):"]
-    for error in exc.errors(include_url=False):
-        loc = ".".join(str(part) for part in error["loc"]) or "<root>"
-        lines.append(f"  {loc}: {error['msg']}")
+    errors = config_field_errors(exc)
+    lines = [f"invalid config ({len(errors)} error(s)):"]
+    lines.extend(f"  {e.field}: {e.message}" for e in errors)
     return "\n".join(lines)
 
 
