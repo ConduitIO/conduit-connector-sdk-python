@@ -62,6 +62,45 @@ doc's Upgrade/rollback section for the pre-1.0 caveat).
   lookup at exec time, per design doc §1.1.6) and every third-party
   dependency vendored in, including compiled-extension dependencies
   (`grpcio`, `pydantic-core`) via an extract-on-first-run bootstrap.
+- `sdk.batch.size`/`sdk.batch.delay` batching middleware (`_batch.py`), for
+  both `Source` and `Destination`, matching the Go SDK's exact activation
+  threshold (`size > 1 || delay > 0`) and flush-on-end/flush-on-drain
+  semantics. The two parameters are now merged into every connector's
+  `Specify` response automatically, matching Go's `DefaultSourceMiddleware`/
+  `DefaultDestinationMiddleware` behavior. Source-side batching buffers
+  individual `read()` calls (Go's fallback path — this SDK has no
+  `read_batch`/`ReadN` override point yet, a documented, tracked gap, not an
+  oversight).
+- `conduit.schema.AvroSchema` (new optional extra, `conduit-connector-sdk[avro]`,
+  via `fastavro`): plain, headerless Avro binary encode/decode, wire-compatible
+  with `conduit-commons`' `schema/avro` package (`github.com/iskorotkov/avro/v2`,
+  the maintained fork of the archived `hamba/avro/v2`; conduit-commons#279) —
+  proven by golden bytes from *both* encoders plus a committed Go verifier
+  (`tools/avro_fixture_gen`) that re-derives the Go bytes and confirms Go
+  decodes this SDK's bytes, not by a Python-only round-trip
+  (`tests/test_schema_avro.py`, `tests/testdata/avro_golden.json`).
+  `encode()` validates values against the schema before writing (int/long
+  require `int` — `bool` rejected; float/double require `float`; unknown
+  fields rejected), mirroring the Go codec's marshal-time strictness — a
+  value that would be silently coerced is an error, never a different
+  value on the wire (invariant 6). No schema registry client ships with
+  this — see the design doc §2.6's status update for the exact scope
+  boundary.
+- `Metadata.set_key_schema`/`get_key_schema`/`set_payload_schema`/
+  `get_payload_schema` (`record.py`): typed accessors for the
+  `opencdc.{key,payload}.schema.{subject,version}` metadata keys.
+- Stable, machine-readable config-validation error codes:
+  `errors.ConfigFieldError`/`ConfigValidationError`/`config_field_errors()`.
+  Field-level failures now carry a stable `.code` (pydantic v2's own
+  documented `error["type"]` identifiers for connector-authored config
+  fields; `INVALID_BATCH_SIZE_CODE`/`INVALID_BATCH_DELAY_CODE` for the two
+  SDK-injected `sdk.batch.*` keys) to assert on instead of parsing message
+  text. Not yet transmitted over the wire — the connector protocol has no
+  stable error-code slot yet (see `ConnectorError`'s existing docstring).
+- `testing.fixtures.tombstone_record()`/`raw_record()`, and a new
+  "record shapes" acceptance-suite category (raw/structured/tombstone
+  destination-write acceptance, contract version bumped to `2026-08.v2`) and
+  a new "config validation error has a stable code" category.
 
 ### Fixed
 

@@ -1,0 +1,54 @@
+{
+  "_provenance": {
+    "purpose": "Cross-language Avro wire-compatibility fixture for conduit.schema.AvroSchema (WS2). A Python-only round-trip is not evidence of Go interop, so both directions are recorded and independently verified: go_avro_hex is what avro.Marshal actually produces today (re-derived and compared by tools/avro_fixture_gen's verify mode, which fails CI if the committed bytes drift), and python_avro_hex is fastavro schemaless_writer output for the same value, which the same Go verifier decodes back to the expected value.",
+    "go_codec": "github.com/iskorotkov/avro/v2 v2.34.0 -- the maintained fork of hamba/avro/v2 that conduit-commons' schema/avro package (Serde) wraps directly (conduit-commons#279 replaced the archived hamba module with this fork; same codec, plain headerless Avro binary). See tools/avro_fixture_gen/main.go.",
+    "python_codec": "fastavro (schemaless_writer/schemaless_reader), v1.12.2 at generation time.",
+    "generator_note": "go_avro_hex: avro.ParseBytes(schema) + avro.Marshal(schema, value) via `go run . -emit` in tools/avro_fixture_gen (which skips go_side_nondeterministic cases: a non-empty map field makes Go's bytes unpinnable, since Go's avro.Marshal iterates map entries in randomized order). python_avro_hex: fastavro.schemaless_writer (bytes-typed fields hold their content as a UTF-8 string in `value`, listed in `bytes_fields`; both codecs convert str<->bytes at that field). All verified by `go run . -fixture tests/testdata/avro_golden.json` (re-derives go_avro_hex and decodes python_avro_hex to the expected value; for nondeterministic cases it prints LIVE_HEX from a live Go marshal, which the Python tests decode back to the value). Regenerate go_avro_hex with -emit, python_avro_hex with fastavro, then run the verifier before committing.",
+    "bytes_field_convention": "JSON has no bytes literal, so a bytes-typed field's content is stored in `value` as a UTF-8 string (the case's `bytes_fields` names those fields) and both codecs convert str<->bytes there; the pinned hexes are of the encoded bytes, not the string form.",
+    "map_nondeterminism_note": "The with_map case has a non-empty map field and is therefore go_side_nondeterministic: Go's avro.Marshal iterates Go map entries in randomized order, so it has no stable go_avro_hex -- byte-compat across languages is impossible by construction there, no matter what a Python encoder does. What is pinned and verified instead: python_avro_hex (fastavro iterates dicts in insertion order, so Python bytes are stable), the Go verifier decodes those Python bytes, and the live-Go test decodes Go's own freshly-marshaled map bytes in Python -- decoding is order-independent in both codecs, which is the property that matters. This is a Go-side property, not a Python deficiency.",
+    "array_framing_note": "Avro's array/map block framing permits two spec-legal styles: a plain positive item count, or a negative count paired with an explicit byte-size prefix (for reader skip-ahead). iskorotkov/avro (like hamba before it) emits the size-prefixed form for non-empty blocks -- arrays *and* maps (visible in with_map's LIVE_HEX, whose count is zigzag(-2) followed by the block size); fastavro emits the plain form for both. All are mutually decodable -- the Go verifier decodes python_avro_hex for every case, the Python tests decode go_avro_hex, and the live-Go test decodes LIVE_HEX -- but the two encoders' bytes are not identical for schemas containing a non-empty array or map field. Case null_note has an empty array block (count 0 in either style), so it is fully byte-exact in both directions."
+  },
+  "schema_json": "{\n  \"type\": \"record\",\n  \"name\": \"OpenCDCPayload\",\n  \"namespace\": \"io.conduit.example\",\n  \"fields\": [\n    {\"name\": \"id\", \"type\": \"long\"},\n    {\"name\": \"name\", \"type\": \"string\"},\n    {\"name\": \"active\", \"type\": \"boolean\"},\n    {\"name\": \"score\", \"type\": \"double\"},\n    {\"name\": \"tags\", \"type\": {\"type\": \"array\", \"items\": \"string\"}},\n    {\"name\": \"note\", \"type\": [\"null\", \"string\"], \"default\": null}\n  ]\n}",
+  "cases": [
+    {
+      "name": "with_note",
+      "value": {"id": 42, "name": "widget", "active": true, "score": 3.14159, "tags": ["a", "b", "c"], "note": "hello from go"},
+      "go_avro_hex": "540c776964676574016e861bf0f9210940050c02610262026300021a68656c6c6f2066726f6d20676f",
+      "python_avro_hex": "540c776964676574016e861bf0f92109400602610262026300021a68656c6c6f2066726f6d20676f",
+      "byte_exact_encode_both_directions": false
+    },
+    {
+      "name": "null_note",
+      "value": {"id": 7, "name": "gadget", "active": false, "score": -1.5, "tags": [], "note": null},
+      "go_avro_hex": "0e0c67616467657400000000000000f8bf0000",
+      "python_avro_hex": "0e0c67616467657400000000000000f8bf0000",
+      "byte_exact_encode_both_directions": true
+    },
+    {
+      "name": "scalars",
+      "schema_json": "{\"type\":\"record\",\"name\":\"Scalars\",\"namespace\":\"io.conduit.example\",\"fields\":[{\"name\":\"i\",\"type\":\"int\"},{\"name\":\"l\",\"type\":\"long\"},{\"name\":\"f\",\"type\":\"float\"},{\"name\":\"d\",\"type\":\"double\"},{\"name\":\"s\",\"type\":\"string\"},{\"name\":\"b\",\"type\":\"boolean\"},{\"name\":\"by\",\"type\":\"bytes\"}]}",
+      "value": {"i": 123, "l": 456789, "f": 1.5, "d": -2.25, "s": "hello", "b": true, "by": "hi"},
+      "bytes_fields": ["by"],
+      "go_avro_hex": "f601aae1370000c03f00000000000002c00a68656c6c6f01046869",
+      "python_avro_hex": "f601aae1370000c03f00000000000002c00a68656c6c6f01046869",
+      "byte_exact_encode_both_directions": true
+    },
+    {
+      "name": "nested",
+      "schema_json": "{\"type\":\"record\",\"name\":\"Outer\",\"namespace\":\"io.conduit.example\",\"fields\":[{\"name\":\"id\",\"type\":\"long\"},{\"name\":\"inner\",\"type\":{\"type\":\"record\",\"name\":\"Inner\",\"fields\":[{\"name\":\"x\",\"type\":\"long\"},{\"name\":\"label\",\"type\":\"string\"}]}}]}",
+      "value": {"id": 5, "inner": {"x": 10, "label": "nested"}},
+      "go_avro_hex": "0a140c6e6573746564",
+      "python_avro_hex": "0a140c6e6573746564",
+      "byte_exact_encode_both_directions": true
+    },
+    {
+      "name": "with_map",
+      "schema_json": "{\"type\":\"record\",\"name\":\"WithAttrs\",\"namespace\":\"io.conduit.example\",\"fields\":[{\"name\":\"id\",\"type\":\"long\"},{\"name\":\"attrs\",\"type\":{\"type\":\"map\",\"values\":\"string\"}}]}",
+      "value": {"id": 3, "attrs": {"alpha": "one", "beta": "two"}},
+      "go_avro_hex": "",
+      "python_avro_hex": "06040a616c706861066f6e6508626574610674776f00",
+      "byte_exact_encode_both_directions": false,
+      "go_side_nondeterministic": true
+    }
+  ]
+}

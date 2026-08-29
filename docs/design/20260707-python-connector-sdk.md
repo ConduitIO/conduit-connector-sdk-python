@@ -530,21 +530,44 @@ flagged as landing around v0.16 per "SDK & embedding developer experience".
 Reserving the field now avoids a breaking SDK change when that lands; until
 then it's always `None` and unused by the wire encoding.
 
-#### 2.6 Batching and schema: what Phase 1 (v0.19 core) defers
+#### 2.6 Batching and schema: what Phase 1 (v0.19 core) defers, and what WS2 (v0.20) implements
 
 Go's `ReadN`/`Write([]Record)` batch APIs and `sdk.batch.size`/`sdk.batch.delay`
 middleware are useful but not required for a minimally-working connector, since
 the wire protocol's `Run` stream is already batch-shaped at the message level
-regardless of SDK-side buffering. **Phase 1** implements the direct mapping
+regardless of SDK-side buffering. **Phase 1** implemented the direct mapping
 only: `async def read(self) -> Record` (SDK wraps single records into
 single-record batches on the wire) and `async def write(self, records:
 list[Record]) -> None` (destination `Run` messages are naturally batched, so
-no author-side batching primitive is needed there at all). A `read_batch`
-override point and `sdk.batch.size`/`delay`-equivalent config are **Phase 2
-(fast-follow, v0.20)**. Schema extraction/encoding middleware (Avro
-registration, `SourceWithSchemaExtraction` et al.) is **Phase 2** as well —
-Phase 1 records carry raw `bytes`/`dict` only, no schema subject/version
-metadata is auto-populated.
+no author-side batching primitive was needed there at all).
+
+**Status update (v0.20 plan, WS2 — implemented, not deferred anymore):**
+`sdk.batch.size`/`sdk.batch.delay` middleware is implemented for both source
+and destination, matching the Go SDK's exact activation threshold
+(`size > 1 || delay > 0`) and flush-on-end semantics — see `conduit/_batch.py`'s
+module docstring for the precise contract, including one deliberate,
+documented divergence: **a `read_batch`/`ReadN` author override point is
+still *not* implemented** (that specific piece remains deferred), so source
+batching today always buffers individual `read()` calls — Go's own
+*fallback* behavior when a connector doesn't implement `ReadN`, never its
+optimized path. Adding `read_batch` is tracked as its own follow-up.
+
+Avro schema support is implemented as `conduit.schema.AvroSchema` (optional
+extra, `conduit-connector-sdk[avro]`), wire-compatible with
+`conduit-commons`' `schema/avro` package — which wraps
+`github.com/iskorotkov/avro/v2` (the maintained fork of the archived
+`hamba/avro/v2`, adopted in conduit-commons#279; same plain, headerless
+wire format). The compatibility claim is proven cross-language, not by a
+Python-only round-trip: `tests/testdata/avro_golden.json` records bytes
+from both encoders, and the committed Go verifier in
+`tools/avro_fixture_gen` re-derives the Go bytes live and confirms Go
+decodes this SDK's encode output — see `tests/test_schema_avro.py`.
+**Still not implemented:** a schema registry client (no `SchemaService`
+gRPC stubs exist in this repo) and automatic schema subject/version
+metadata population — `conduit.record.
+Metadata.set_payload_schema`/`set_key_schema` exist as typed accessors, but
+an author must call them explicitly; there is no `SourceWithSchemaExtraction`-
+equivalent middleware auto-populating them from a registered schema yet.
 
 #### 2.7 End-to-end example (illustrative — not final API)
 
@@ -726,8 +749,15 @@ not just in a way that fails if the process hangs forever.
 
 #### Phase 2 (fast-follow, v0.20)
 
-- `read_batch` override + batch-size/delay config (§2.6).
-- Schema extraction/encoding middleware.
+- ~~`read_batch` override + batch-size/delay config (§2.6).~~ **Batch-size/delay
+  config (`sdk.batch.size`/`sdk.batch.delay`) shipped in WS2** — see §2.6's
+  status update. The `read_batch`/`ReadN` author override point specifically
+  is **still open**, tracked separately.
+- ~~Schema extraction/encoding middleware.~~ **Avro encode/decode
+  (`conduit.schema.AvroSchema`) shipped in WS2**, wire-proven against Go —
+  see §2.6. A schema-registry-integrated extraction middleware
+  (`SourceWithSchemaExtraction`-equivalent, auto-populating schema
+  subject/version metadata) is **still open**.
 - Full docs: per-connector-author tutorial, docstring-coverage-enforced
   reference, cookbook recipes.
 - Golden record-shape fixture corpus shared with the Go/other-language suites.

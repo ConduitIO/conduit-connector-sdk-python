@@ -42,11 +42,17 @@ from conduit.destination import Destination, _DestinationServicer
 from conduit.errors import BatchWriteError
 from conduit.record import Operation, Record
 from conduit.source import Source, _SourceServicer
-from conduit.testing.fixtures import create_record
+from conduit.testing.fixtures import create_record, raw_record, tombstone_record
 from connector.v2 import source_pb2
 
-CONTRACT_VERSION = "2026-07.v1"
-"""Version tag for this acceptance suite. See module docstring."""
+CONTRACT_VERSION = "2026-08.v2"
+"""Version tag for this acceptance suite. See module docstring.
+
+Bumped from ``2026-07.v1`` to ``v2`` for WS2's new, purely-additive
+"record shapes" category (:meth:`AcceptanceTestSuite.test_destination_accepts_raw_record`/
+``..._structured_record``/``..._tombstone_record``) -- no existing category
+changed shape or was removed.
+"""
 
 
 class AcceptanceTestDriver(Protocol):
@@ -188,6 +194,45 @@ class AcceptanceTestSuite:
                     "missing a required field -- required-param validation is broken"
                 )
 
+    async def test_config_validation_error_has_a_stable_code_not_just_a_message(self) -> None:
+        """A missing-required-field failure carries a stable, assertable code.
+
+        Per WS2: config validation errors must be identifiable by a stable
+        code, not by parsing free-text message wording. Uses
+        :func:`~conduit.errors.config_field_errors` (pydantic v2's own
+        documented ``error["type"]`` identifiers, e.g. ``"missing"``) --
+        see that function's docstring and :class:`~conduit.errors.ConfigFieldError`
+        for what "stable" means here precisely.
+        """
+        from conduit.errors import config_field_errors
+
+        driver = self.driver()
+        for cls, base, config in (
+            (driver.source_class(), Source, driver.source_config()),
+            (driver.destination_class(), Destination, driver.destination_config()),
+        ):
+            if cls is None:
+                continue
+            config_cls = _config_class(cls, base)
+            required = {
+                name for name, info in config_cls.model_fields.items() if info.is_required()
+            }
+            if not required:
+                continue
+            missing_one = dict(config)
+            missing_field = next(iter(required))
+            missing_one.pop(missing_field)
+            try:
+                config_cls.model_validate(missing_one)
+            except pydantic.ValidationError as exc:
+                errors = config_field_errors(exc)
+                matching = [e for e in errors if e.field == missing_field]
+                assert matching, f"expected a ConfigFieldError for field {missing_field!r}"
+                assert matching[0].code == "missing", (
+                    f"expected code 'missing' for an omitted required field, "
+                    f"got {matching[0].code!r} -- assert on .code, not message text"
+                )
+
     # -- Category: resume-at-position (snapshot and CDC-equivalent) -------
 
     async def test_resume_at_position_snapshot(self) -> None:
@@ -258,6 +303,40 @@ class AcceptanceTestSuite:
             await destination.open()
             await destination.write([record])  # must not raise
             await destination.teardown()
+
+    # -- Category: record shapes (raw, structured, tombstone) --------------
+
+    async def test_destination_accepts_raw_record(self) -> None:
+        """A raw-``bytes`` key/payload record writes successfully. See ``B3``/§2.3."""
+        await self._assert_destination_accepts(
+            raw_record(b"acceptance-raw-1", b"raw-key-1", b"raw-value-1")
+        )
+
+    async def test_destination_accepts_structured_record(self) -> None:
+        """A structured (``dict``) key/payload record writes successfully."""
+        await self._assert_destination_accepts(
+            create_record(b"acceptance-structured-1", "1", {"id": "1"})
+        )
+
+    async def test_destination_accepts_tombstone_record(self) -> None:
+        """A tombstone (``DELETE``, no payload at all) record writes successfully.
+
+        The destination must not require ``payload.after`` (or ``before``)
+        to be present -- a tombstone's whole point is that neither is.
+        """
+        await self._assert_destination_accepts(tombstone_record(b"acceptance-tombstone-1", "1"))
+
+    async def _assert_destination_accepts(self, record: Record) -> None:
+        driver = self.driver()
+        destination_cls = driver.destination_class()
+        if destination_cls is None:
+            return  # source-only connector -- nothing to write to
+        config_cls = _config_class(destination_cls, Destination)
+        destination = destination_cls()
+        await destination.configure(config_cls.model_validate(dict(driver.destination_config())))
+        await destination.open()
+        await destination.write([record])  # must not raise
+        await destination.teardown()
 
     # -- Category: read timeout behavior ------------------------------------
 
