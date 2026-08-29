@@ -7,7 +7,7 @@ name = "conduit-connector-sdk"
 # NOTE: version is a placeholder until the first tagged release; the release
 # workflow (fast-follow, see docs/design/20260707-python-connector-sdk.md §3)
 # will drive this from git tags.
-version = "0.1.0.dev0"
+version = "0.1.0.dev1"
 description = "Python SDK for building Conduit source and destination connectors."
 readme = "README.md"
 license = "Apache-2.0"
