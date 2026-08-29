@@ -37,6 +37,21 @@ class _RecordingDestination(Destination[_Config]):
         self.write_calls.append([r.position for r in records])
 
 
+class _SignalOnFirstWriteDestination(_RecordingDestination):
+    """Signals the moment the first ``write()`` returns -- a happens-after
+    marker for the test: the records are durably written, and (same event
+    loop, strictly ordered) the test task wakes before the batching loop
+    can create its next ``__anext__``."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.first_write = asyncio.Event()
+
+    async def write(self, records: list[Record]) -> None:
+        await super().write(records)
+        self.first_write.set()
+
+
 def _run_request(*positions: bytes) -> destination_pb2.Destination.Run.Request:
     records = [opencdc_pb2.Record(position=p, operation=Operation.CREATE.value) for p in positions]
     return destination_pb2.Destination.Run.Request(records=records)
@@ -191,6 +206,45 @@ class TestDestinationBatchingDrain:
         assert len(responses) == 1
         assert [ack.position for ack in responses[0].acks] == [b"a", b"b"]
         assert all(ack.error == "" for ack in responses[0].acks)
+
+    async def test_drain_stops_pulling_on_a_continuous_stream(self) -> None:
+        """A continuously-writing client can't keep the drain window open:
+        once the stop is observed, the next ``__anext__`` is never created,
+        so only what was already pulled (and written) at that instant is
+        emitted. Everything never pulled stays un-emitted and unacked --
+        never written, so never acked, so Conduit redelivers it
+        (invariants 1 and 3: no silent drop, nothing acked that wasn't
+        durably handled)."""
+        destination = _SignalOnFirstWriteDestination()
+        servicer = _DestinationServicer(destination, _Config)
+        await _configure(servicer, {"sdk.batch.size": "2"})
+
+        async def request_stream() -> object:
+            for request in (
+                _run_request(b"a", b"b"),
+                _run_request(b"c", b"d"),
+                _run_request(b"e", b"f"),
+                _run_request(b"g", b"h"),
+            ):
+                yield request  # never blocks: the client keeps writing
+
+        async def consume() -> None:
+            async for _response in servicer.Run(request_stream(), object()):
+                pass
+
+        consume_task = asyncio.create_task(consume())
+        # `first_write` fires happens-after [a,b] was durably written and
+        # happens-before the next `__anext__` is created (see
+        # `_SignalOnFirstWriteDestination`), so the stop lands while c..h
+        # are still unpulled.
+        await asyncio.wait_for(destination.first_write.wait(), timeout=2.0)
+
+        await asyncio.wait_for(servicer.drain(), timeout=2.0)
+        await asyncio.wait_for(consume_task, timeout=2.0)
+
+        # Only the already-written batch was emitted; c..h were never pulled,
+        # so never written, so never acked (redelivered by Conduit).
+        assert destination.write_calls == [[b"a", b"b"]]
 
 
 class TestDestinationBatchingHardCancel:

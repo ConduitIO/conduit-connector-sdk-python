@@ -293,7 +293,12 @@ class _DestinationServicer(destination_pb2_grpc.DestinationPluginServicer):
         event-loop iteration instead of only after the next request
         arrives -- without it, ``drain()`` would block forever on
         ``_stopped_event`` and the shutdown watchdog would force-exit
-        with records never written or acked (invariants 7 and 3). The
+        with records never written or acked (invariants 7 and 3). Once
+        the stop is observed, the top-of-loop check returns without
+        creating the next ``__anext__``, so a continuously-writing
+        client can't keep the drain window open indefinitely -- only a
+        request already pulled off the wire at that instant is still
+        processed (the ``next_request.done()`` branch). The
         source side has no such gap (``_read_loop`` observes
         ``_stop_event`` inside its own loop -- see ``conduit.source``);
         that asymmetry is deliberate, and the passthrough branch's
@@ -303,6 +308,17 @@ class _DestinationServicer(destination_pb2_grpc.DestinationPluginServicer):
         next_request: asyncio.Task[destination_pb2.Destination.Run.Request] | None = None
         try:
             while True:
+                if self._stop_event.is_set():
+                    # A drain landed: don't even create the next `__anext__`,
+                    # so a continuously-writing client can't keep this loop
+                    # pulling records until it pends (bounded only by the
+                    # shutdown watchdog). At most one request already pulled
+                    # off the wire when the stop became visible still flows
+                    # through the `next_request.done()` branch below -- the
+                    # narrow "already in flight" window `drain` documents.
+                    # Any records buffered in `collect_batches` are flushed
+                    # and acked when this generator returns.
+                    return
                 if next_request is None:
                     next_request = asyncio.ensure_future(request_iterator.__anext__())
                 waiters: set[asyncio.Task[object]] = {next_request, stop_wait}
