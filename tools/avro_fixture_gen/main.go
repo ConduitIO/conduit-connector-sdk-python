@@ -16,25 +16,35 @@
 //  3. that Go decodes each case's python_avro_hex -- bytes produced by
 //     fastavro's schemaless_writer -- to that same expected value.
 //
+// One class of case is exempt from check 1 by construction: a record with
+// a non-empty map field (go_side_nondeterministic: true). Go's avro.Marshal
+// iterates map entries in randomized order, so such a case has no stable
+// Go bytes to pin. For those cases the verifier instead marshals the value
+// live and prints it as "LIVE_HEX <name> <hex>" -- the Python tests decode
+// those genuinely-Go-produced bytes back to the value, which is the
+// property that matters (decoding is order-independent in both codecs).
+//
 // Usage:
 //
 //	go run . -fixture ../../tests/testdata/avro_golden.json   # verify
-//	go run . -emit -fixture ../../tests/testdata/avro_golden.json  # print avro.Marshal output per case (for regenerating go_avro_hex)
+//	go run . -emit -fixture ../../tests/testdata/avro_golden.json  # print avro.Marshal output per case (for regenerating go_avro_hex; skips nondeterministic cases)
 //
 // Exit status is 0 only if every check passes for every case; failures are
 // reported per case with the offending bytes. See the fixture's
 // _provenance key and conduit/schema.py's module docstring for the full
-// contract and its one documented caveat (array/map block framing:
-// spec-legal both ways, mutually decodable, not byte-identical).
+// contract and its caveats (array/map block framing: spec-legal both ways,
+// mutually decodable, not byte-identical).
 //
 // Note on value typing: the fixture's values are JSON, which decodes to
 // float64 for every number; iskorotkov/avro's Marshal rejects float64 for
-// integer Avro types, so values are coerced to the schema's Go types
-// (long/int -> int64, double/float -> float64, etc.) before marshaling --
-// that coercion is what coerceToSchema does. Decoded values are compared to
-// the expected value as canonical JSON (json.Marshal), which is
-// type-identity-agnostic for integral values (int64(42) and float64(42)
-// marshal identically) and exact for everything else.
+// integer Avro types (and float64 for Avro float), so values are coerced
+// to the schema's Go types (long -> int64, int -> int32, double -> float64,
+// float -> float32, bytes -> []byte, etc.) before marshaling -- that
+// coercion is what coerceToSchema does. Decoded values are compared to the
+// coerced expected value as canonical JSON (json.Marshal), which is
+// type-identity-agnostic for integral values (int32(42) and int64(42)
+// marshal identically) and exact for everything else ([]byte marshals to
+// base64 on both sides).
 package main
 
 import (
@@ -51,14 +61,24 @@ import (
 type fixtureCase struct {
 	Name                          string         `json:"name"`
 	Value                         map[string]any `json:"value"`
+	SchemaJSON                    string         `json:"schema_json"` // optional per-case override of the fixture-level schema
 	GoAvroHex                     string         `json:"go_avro_hex"`
 	PythonAvroHex                 string         `json:"python_avro_hex"`
 	ByteExactEncodeBothDirections bool           `json:"byte_exact_encode_both_directions"`
+	GoSideNondeterministic        bool           `json:"go_side_nondeterministic"` // non-empty map field: no stable Go bytes (see header comment)
 }
 
 type fixture struct {
 	SchemaJSON string        `json:"schema_json"`
 	Cases      []fixtureCase `json:"cases"`
+}
+
+func caseSchema(f fixture, c fixtureCase) (avro.Schema, error) {
+	schemaText := f.SchemaJSON
+	if c.SchemaJSON != "" {
+		schemaText = c.SchemaJSON
+	}
+	return avro.ParseBytes([]byte(schemaText))
 }
 
 func main() {
@@ -76,12 +96,16 @@ func main() {
 	if err := json.Unmarshal(raw, &f); err != nil {
 		fatalf("parse fixture: %v", err)
 	}
-	schema, err := avro.ParseBytes([]byte(f.SchemaJSON))
-	if err != nil {
-		fatalf("parse schema: %v", err)
-	}
 	if *emit {
 		for _, c := range f.Cases {
+			schema, err := caseSchema(f, c)
+			if err != nil {
+				fatalf("%s: parse schema: %v", c.Name, err)
+			}
+			if c.GoSideNondeterministic {
+				fmt.Printf("# %s: go_avro_hex is unpinnable (non-empty map field; Go map order is randomized) -- pinned via LIVE_HEX in verify mode instead\n", c.Name)
+				continue
+			}
 			b, err := avro.Marshal(schema, coerceToSchema(schema, c.Value))
 			if err != nil {
 				fatalf("%s: marshal: %v", c.Name, err)
@@ -94,36 +118,59 @@ func main() {
 	checks := 0
 	failures := 0
 	for _, c := range f.Cases {
+		schema, err := caseSchema(f, c)
+		if err != nil {
+			fatalf("%s: parse schema: %v", c.Name, err)
+		}
 		coerced := coerceToSchema(schema, c.Value)
 
-		// 1. Go's own encoding reproduces the committed go_avro_hex.
-		goBytes, err := avro.Marshal(schema, coerced)
-		if err != nil {
-			failures++
-			fmt.Printf("FAIL %-12s marshal (go): %v\n", c.Name, err)
-			continue
-		}
-		checks++
-		if got := hex.EncodeToString(goBytes); got != c.GoAvroHex {
-			failures++
-			fmt.Printf("FAIL %-12s go_avro_hex differs from live avro.Marshal:\n", c.Name)
-			fmt.Printf("      committed: %s\n      live:      %s\n", c.GoAvroHex, got)
+		if c.GoSideNondeterministic {
+			// No go_avro_hex to pin: marshal live so the Python tests can
+			// decode genuinely-Go-produced bytes, and sanity-check Go's own
+			// round-trip of its (randomly-ordered) encoding.
+			goBytes, err := avro.Marshal(schema, coerced)
+			if err != nil {
+				failures++
+				fmt.Printf("FAIL %-12s marshal (go, live): %v\n", c.Name, err)
+				continue
+			}
+			checks++
+			fmt.Printf("LIVE_HEX %s %s\n", c.Name, hex.EncodeToString(goBytes))
+			if ok := decodeMatches(schema, goBytes, coerced, c.Name, "live-go"); !ok {
+				failures++
+			}
+			checks++
+		} else {
+			// 1. Go's own encoding reproduces the committed go_avro_hex.
+			goBytes, err := avro.Marshal(schema, coerced)
+			if err != nil {
+				failures++
+				fmt.Printf("FAIL %-12s marshal (go): %v\n", c.Name, err)
+				continue
+			}
+			checks++
+			if got := hex.EncodeToString(goBytes); got != c.GoAvroHex {
+				failures++
+				fmt.Printf("FAIL %-12s go_avro_hex differs from live avro.Marshal:\n", c.Name)
+				fmt.Printf("      committed: %s\n      live:      %s\n", c.GoAvroHex, got)
+			}
+
+			// 2. Go decodes its own bytes to the expected value.
+			if ok := decodeMatches(schema, goBytes, coerced, c.Name, "go_avro_hex"); !ok {
+				failures++
+			}
+			checks++
 		}
 
-		// 2. Go decodes its own bytes to the expected value.
-		if ok := decodeMatches(schema, goBytes, c.Value, c.Name, "go_avro_hex"); !ok {
-			failures++
-		}
-		checks++
-
-		// 3. Go decodes Python's bytes to the expected value.
+		// 3. Go decodes Python's bytes to the expected value (every case,
+		// nondeterministic ones included -- that direction is always pinnable).
 		pythonBytes, err := hex.DecodeString(c.PythonAvroHex)
 		if err != nil {
 			failures++
 			fmt.Printf("FAIL %-12s python_avro_hex is not valid hex: %v\n", c.Name, err)
 			continue
 		}
-		if ok := decodeMatches(schema, pythonBytes, c.Value, c.Name, "python_avro_hex"); !ok {
+		if ok := decodeMatches(schema, pythonBytes, coerced, c.Name, "python_avro_hex"); !ok {
 			failures++
 		}
 		checks++
@@ -139,7 +186,7 @@ func main() {
 // decodeMatches unmarshals b against schema and compares the result to the
 // expected value canonically (both as json.Marshal output), reporting a
 // mismatch with the offending bytes.
-func decodeMatches(schema avro.Schema, b []byte, expected map[string]any, name, source string) bool {
+func decodeMatches(schema avro.Schema, b []byte, expected any, name, source string) bool {
 	var decoded map[string]any
 	if err := avro.Unmarshal(schema, b, &decoded); err != nil {
 		fmt.Printf("FAIL %-12s go cannot decode %s: %v\n", name, source, err)
@@ -165,7 +212,10 @@ func decodeMatches(schema avro.Schema, b []byte, expected map[string]any, name, 
 
 // coerceToSchema converts a JSON-decoded value (all numbers float64) into
 // the Go types iskorotkov/avro's Marshal expects for the given schema:
-// integral types to int64, double/float to float64, arrays to []any, maps to
+// long -> int64, int -> int32 (the codec rejects int64 for Avro int),
+// double -> float64, float -> float32 (the codec rejects float64 for Avro
+// float), bytes/fixed -> []byte (the fixture stores bytes fields as UTF-8
+// strings, see the fixture's _provenance), arrays to []any, maps to
 // map[string]any, and union members to the first matching branch. This
 // mirrors what conduit-commons' engine does when it marshals
 // opencdc.StructuredData, and it is what the "Go side" of the fixture's
@@ -230,7 +280,7 @@ func coerceToSchema(schema avro.Schema, v any) any {
 			}
 		}
 		return v
-	case avro.Long, avro.Int:
+	case avro.Long:
 		switch n := v.(type) {
 		case float64:
 			if n != float64(int64(n)) {
@@ -245,7 +295,22 @@ func coerceToSchema(schema avro.Schema, v any) any {
 			return v
 		}
 		return v
-	case avro.Double, avro.Float:
+	case avro.Int:
+		switch n := v.(type) {
+		case float64:
+			if n != float64(int32(n)) {
+				return v // non-integral or out of int32 range; let avro.Marshal report the error
+			}
+			return int32(n)
+		case json.Number:
+			i, err := n.Int64()
+			if err == nil && int64(int32(i)) == i {
+				return int32(i)
+			}
+			return v
+		}
+		return v
+	case avro.Double:
 		switch n := v.(type) {
 		case int64:
 			return float64(n)
@@ -257,8 +322,25 @@ func coerceToSchema(schema avro.Schema, v any) any {
 			return v
 		}
 		return v
+	case avro.Float:
+		switch n := v.(type) {
+		case float64:
+			return float32(n)
+		case json.Number:
+			f, err := n.Float64()
+			if err == nil {
+				return float32(f)
+			}
+			return v
+		}
+		return v
+	case avro.Bytes, avro.Fixed:
+		if s, ok := v.(string); ok {
+			return []byte(s)
+		}
+		return v
 	default:
-		return v // string, boolean, null, enum, fixed, bytes: pass through
+		return v // string, boolean, null, enum: pass through
 	}
 }
 

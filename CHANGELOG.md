@@ -79,8 +79,13 @@ doc's Upgrade/rollback section for the pre-1.0 caveat).
   (`tools/avro_fixture_gen`) that re-derives the Go bytes and confirms Go
   decodes this SDK's bytes, not by a Python-only round-trip
   (`tests/test_schema_avro.py`, `tests/testdata/avro_golden.json`).
-  No schema registry client ships with this — see the design doc §2.6's status
-  update for the exact scope boundary.
+  `encode()` validates values against the schema before writing (int/long
+  require `int` — `bool` rejected; float/double require `float`; unknown
+  fields rejected), mirroring the Go codec's marshal-time strictness — a
+  value that would be silently coerced is an error, never a different
+  value on the wire (invariant 6). No schema registry client ships with
+  this — see the design doc §2.6's status update for the exact scope
+  boundary.
 - `Metadata.set_key_schema`/`get_key_schema`/`set_payload_schema`/
   `get_payload_schema` (`record.py`): typed accessors for the
   `opencdc.{key,payload}.schema.{subject,version}` metadata keys.

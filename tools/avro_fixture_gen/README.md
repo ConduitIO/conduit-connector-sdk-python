@@ -17,11 +17,20 @@ For every case in `tests/testdata/avro_golden.json`:
 3. Go decodes `python_avro_hex` (this SDK's `encode()` output, pinned by
    the Python tests) to the expected value.
 
+Cases marked `go_side_nondeterministic` (a non-empty map field) are exempt
+from 1 and 2 by construction — Go's `avro.Marshal` iterates map entries in
+randomized order, so there is no stable Go bytes to pin. For those cases
+the verifier marshals the value live and prints `LIVE_HEX <name> <hex>`;
+the Python tests decode those genuinely-Go-produced bytes back to the
+value (decoding is order-independent in both codecs).
+
 Values are JSON (all numbers decode as `float64`); they are coerced to the
-Go types `avro.Marshal` expects via `coerceToSchema` (long/int → `int64`,
-double/float → `float64`, array → `[]any`, map → `map[string]any`), and
-decoded values are compared to expectations as canonical JSON
-(`json.Marshal`), which is type-identity-agnostic for integral values.
+Go types `avro.Marshal` expects via `coerceToSchema` (long → `int64`,
+int → `int32`, double → `float64`, float → `float32`, bytes/fixed →
+`[]byte` from the fixture's UTF-8 string form, array → `[]any`, map →
+`map[string]any`), and decoded values are compared to the coerced
+expectation as canonical JSON (`json.Marshal`), which is
+type-identity-agnostic for integral values.
 
 ## Usage
 
@@ -29,7 +38,8 @@ decoded values are compared to expectations as canonical JSON
 # Verify the committed fixture (exit 0 = all checks pass).
 go run . -fixture ../../tests/testdata/avro_golden.json
 
-# Regenerate go_avro_hex for every case (prints "<name> <hex>" lines).
+# Regenerate go_avro_hex for every case (prints "<name> <hex>" lines;
+# skips go_side_nondeterministic cases, which have no pinnable bytes).
 go run . -emit -fixture ../../tests/testdata/avro_golden.json
 ```
 
@@ -37,10 +47,12 @@ Regenerating `python_avro_hex` requires the Python side: encode each
 case's value with `conduit.schema.AvroSchema.encode` (or
 `fastavro.schemaless_writer` directly) and paste the hex into the fixture,
 then run the verifier before committing. The fixture's `_provenance` key
-documents the exact codecs and the two honest caveats (array block
+documents the exact codecs and the honest caveats (array/map block
 framing: spec-legal both ways, mutually decodable, not byte-identical;
 map fields: nondeterministic on the Go side by construction — Go map
-iteration order — so the fixture deliberately has no map field).
+iteration order — pinned for the Python direction only, plus live-Go
+decode; bytes fields: stored as UTF-8 strings in `value`, listed in
+`bytes_fields`).
 
 This tool is also run by `tests/test_schema_avro.py::test_go_verifier_confirms_python_bytes_decode_in_go`
 whenever a Go toolchain is available; Python-only CI relies on the

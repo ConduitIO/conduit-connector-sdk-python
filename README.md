@@ -78,6 +78,16 @@ round-trip: the golden fixture records bytes from *both* encoders
 (`tools/avro_fixture_gen`) re-derives the Go bytes live and confirms Go
 decodes this SDK's bytes -- see `tests/test_schema_avro.py`.
 
+`encode()` validates every value against the schema *before* writing
+bytes, with the same strictness the Go codec applies at marshal time:
+`int`/`long` fields require Python `int` (`bool` is rejected),
+`float`/`double` fields require `float`, and a key the schema has no
+field for is rejected -- never silent coercion, never a different value on
+the wire (invariant 6). fastavro by itself silently truncates some of
+these (`42.9` into a `long` writes `42`); this SDK matches the Go codec
+instead, which errors on all of them. One documented divergence: Go
+*drops* unknown record keys, this SDK rejects them with `TypeError`.
+
 This SDK does **not** ship a schema registry client (no `SchemaService`
 gRPC stubs are generated) -- an author supplies schema text themselves and
 is responsible for keeping it consistent with the
