@@ -125,10 +125,13 @@ class Metadata:
 
     Only a representative subset gets typed accessors (§2.3: "don't need
     every Go helper, a representative subset is fine for v0.19 core") --
-    ``created_at``/``read_at``/``collection``. Every well-known key still
-    gets a string constant even without a matching typed accessor, so
-    authors can always read/write via the plain ``dict`` if they need one
-    this module doesn't wrap yet.
+    ``created_at``/``read_at``/``collection`` (v0.19) and the schema
+    reference pairs ``key_schema``/``payload_schema`` (WS2, matching
+    ``opencdc.key.schema.*``/``opencdc.payload.schema.*``; see
+    :mod:`conduit.schema`). Every well-known key still gets a string
+    constant even without a matching typed accessor, so authors can always
+    read/write via the plain ``dict`` if they need one this module doesn't
+    wrap yet.
     """
 
     OPENCDC_VERSION = "opencdc.version"
