@@ -267,9 +267,11 @@ async def collect_batches(
     passthrough branch (no task, no timer, one item in for one batch of one
     item out... actually one item in for one *record* out, unbatched) in
     their own code, matching the Go SDK's own ``if BatchSize > 1 ||
-    BatchDelay > 0`` branch point (``destination.go:182``,
-    ``source_middleware.go:709``) rather than hiding it inside this
-    function.
+    BatchDelay > 0`` branch point (``destination.go:182``; Go's *source*
+    middleware branch is the looser ``BatchSize > 0`` at
+    ``source_middleware.go:709``, and this SDK deliberately shares one
+    threshold for both sides -- see :attr:`BatchConfig.enabled`) rather
+    than hiding it inside this function.
 
     **Flush-on-end, not flush-in-``finally``:** when ``items`` ends
     (``anext`` yields the internal stop sentinel), any non-empty buffered
