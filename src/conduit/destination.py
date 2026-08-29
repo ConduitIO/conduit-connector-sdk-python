@@ -281,12 +281,61 @@ class _DestinationServicer(destination_pb2_grpc.DestinationPluginServicer):
         stream-EOF case and the ``_stop_event``-set drain case go through
         this one exit path, so both get that flush for free rather than
         needing two separate flush call sites.
+
+        The drain case is why this races ``__anext__`` against
+        ``_stop_event.wait()`` instead of checking the flag after each
+        request the way :meth:`Run`'s passthrough branch does: with
+        batching on, a below-threshold remainder can be sitting in
+        :func:`~conduit._batch.collect_batches`'s buffer on an
+        otherwise-idle stream, and a ``drain()`` (SIGTERM) that lands then
+        must still flush it. ``asyncio.wait`` over the two makes the idle
+        stream interruptible, so the stop is observed within one
+        event-loop iteration instead of only after the next request
+        arrives -- without it, ``drain()`` would block forever on
+        ``_stopped_event`` and the shutdown watchdog would force-exit
+        with records never written or acked (invariants 7 and 3). The
+        source side has no such gap (``_read_loop`` observes
+        ``_stop_event`` inside its own loop -- see ``conduit.source``);
+        that asymmetry is deliberate, and the passthrough branch's
+        pre-existing check-after-request behavior is unchanged.
         """
-        async for request in request_iterator:
-            if self._stop_event.is_set():
+        stop_wait = asyncio.ensure_future(self._stop_event.wait())
+        next_request: asyncio.Task[destination_pb2.Destination.Run.Request] | None = None
+        try:
+            while True:
+                if next_request is None:
+                    next_request = asyncio.ensure_future(request_iterator.__anext__())
+                waiters: set[asyncio.Task[object]] = {next_request, stop_wait}
+                await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+                if next_request.done():
+                    # A request already pulled off the wire wins over a
+                    # simultaneously-set stop -- the same "batch already in
+                    # flight still starts" narrow window `drain` documents.
+                    try:
+                        request = next_request.result()
+                    except StopAsyncIteration:
+                        # The wire stream ended -- the equivalent of `async
+                        # for`'s implicit stop. Returning lets
+                        # `collect_batches` flush the buffered remainder
+                        # (flush-on-end). (Re-raising StopAsyncIteration
+                        # from inside this generator would be a PEP 479
+                        # RuntimeError.)
+                        return
+                    next_request = None
+                    for record in records_from_proto(request.records):
+                        yield record
+                    continue
+                # Only the stop event fired: the stream is idle (or a
+                # request is still pending), so stop pulling records off
+                # it. The pending `next_request`, if any, is cancelled in
+                # the `finally` below -- buffered records are flushed and
+                # acked by `collect_batches` when this generator returns.
                 return
-            for record in records_from_proto(request.records):
-                yield record
+        finally:
+            if next_request is not None and not next_request.done():
+                next_request.cancel()
+            if not stop_wait.done():
+                stop_wait.cancel()
 
     async def _write_batch(self, records: Sequence[Record]) -> list[Ack]:
         """Call ``write()`` and translate the outcome into per-record acks.
@@ -351,7 +400,13 @@ class _DestinationServicer(destination_pb2_grpc.DestinationPluginServicer):
 
         The destination has no read-loop analog to halt -- ``Run``'s
         request stream simply ends after this record, which is Conduit's
-        own responsibility, not this servicer's.
+        own responsibility, not this servicer's. (Go's destination-side
+        ``Stop`` actively flushes any buffered batch --
+        ``destination.go:271-272``; the Python equivalent of that flush is
+        the batching path's flush-on-stream-end, which the wire contract
+        delivers via the stream ending after ``Stop``. Equivalent under
+        today's wire contract, but a future protocol change that decouples
+        the two must revisit this.)
         """
         return destination_pb2.Destination.Stop.Response()
 
