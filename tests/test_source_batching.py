@@ -36,12 +36,27 @@ class _CountingRecordsSource(Source[_Config]):
     def __init__(self, n: int) -> None:
         self._n = n
         self._emitted = 0
+        self.acked: list[bytes] = []
 
     async def read(self) -> Record:
         if self._emitted >= self._n:
             raise BackoffRetry()
         self._emitted += 1
         return Record(position=f"pos-{self._emitted}".encode(), operation=Operation.CREATE)
+
+    async def ack(self, position: bytes) -> None:
+        self.acked.append(bytes(position))
+
+
+class _AckPositionsRequest:
+    """Duck-typed stand-in for a `Source.Run.Request` carrying `ack_positions`.
+
+    Matches `tests/test_source.py`'s `_AckPositionsRequest`: `_consume_acks`
+    only reads the `.ack_positions` attribute, so a plain object suffices.
+    """
+
+    def __init__(self, ack_positions: list[bytes]) -> None:
+        self.ack_positions = ack_positions
 
 
 async def _empty_request_stream() -> object:
@@ -161,6 +176,51 @@ class TestSourceBatchingPassthrough:
 
         responses = await _collect_n_responses(servicer, 3)
         assert [len(r.records) for r in responses] == [1, 1, 1]
+
+
+class TestSourceBatchingAckHandling:
+    """Invariant 1 under batching: ack() fires only for positions Conduit confirms.
+
+    Makes the module docstring's "(3) ack handling is unaffected by
+    batching" claim an actual assertion, matching `tests/test_source.py`'s
+    `TestAckOnlyAfterConduitConfirms` for the unbatched path.
+    """
+
+    async def test_acks_are_delivered_in_order_after_conduit_confirms(self) -> None:
+        source = _CountingRecordsSource(n=3)
+        servicer = _SourceServicer(source, _Config)
+        await _configure(servicer, {"sdk.batch.size": "3"})
+
+        responses: list[source_pb2.Source.Run.Response] = []
+        ack_sent = asyncio.Event()
+
+        async def request_stream() -> object:
+            await ack_sent.wait()
+            yield _AckPositionsRequest([b"pos-1", b"pos-2", b"pos-3"])
+
+        async def consume() -> None:
+            async for response in servicer.Run(request_stream(), object()):
+                responses.append(response)
+
+        consume_task = asyncio.create_task(consume())
+        # Wait for the single size-3 batch to be emitted (batching regrouped
+        # three single-record reads into one response).
+        async with asyncio.timeout(2.0):
+            while not responses:  # noqa: ASYNC110 -- see tests/test_source.py's `_wait_until`
+                await asyncio.sleep(0.005)
+        assert len(responses[0].records) == 3
+
+        # Records were produced and emitted, but Conduit has not confirmed
+        # anything yet -- ack() must not have fired (invariant 1), exactly
+        # as in the unbatched path.
+        assert source.acked == []
+
+        ack_sent.set()
+        async with asyncio.timeout(2.0):
+            while source.acked != [b"pos-1", b"pos-2", b"pos-3"]:  # noqa: ASYNC110
+                await asyncio.sleep(0.005)
+        await servicer.Stop(object(), object())
+        await consume_task
 
 
 class TestSourceBatchConfigValidation:

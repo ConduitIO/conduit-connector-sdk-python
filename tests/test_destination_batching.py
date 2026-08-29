@@ -13,6 +13,7 @@ batching middleware.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 
 import pytest
 
@@ -149,6 +150,80 @@ class TestDestinationBatchingFlushOnStop:
         assert destination.write_calls == [[b"a", b"b"]]
         assert len(responses) == 1
         assert [ack.position for ack in responses[0].acks] == [b"a", b"b"]
+
+
+class TestDestinationBatchingDrain:
+    async def test_drain_flushes_buffered_remainder_on_idle_stream(self) -> None:
+        """Regression (adversarial review finding): `_flatten_incoming` must
+        observe `_stop_event` while the stream is open-but-idle, not only
+        after a request arrives -- otherwise a SIGTERM drain blocks forever
+        on `_stopped_event` and the shutdown watchdog force-exits with
+        records never written or acked (invariants 7 and 3)."""
+        destination = _RecordingDestination()
+        servicer = _DestinationServicer(destination, _Config)
+        await _configure(servicer, {"sdk.batch.size": "10"})  # 2 records stay below threshold
+
+        yielded = asyncio.Event()
+
+        async def request_stream() -> object:
+            yield _run_request(b"a", b"b")
+            yielded.set()
+            await asyncio.Event().wait()  # open-but-idle: no further requests ever
+
+        responses: list[destination_pb2.Destination.Run.Response] = []
+
+        async def consume() -> None:
+            async for response in servicer.Run(request_stream(), object()):
+                responses.append(response)
+
+        consume_task = asyncio.create_task(consume())
+        # `yielded` fires happens-after the records entered collect_batches'
+        # buffer (same event loop, strictly ordered), so this is not a race.
+        await yielded.wait()
+        assert destination.write_calls == []  # below threshold: not yet written
+
+        await asyncio.wait_for(servicer.drain(), timeout=2.0)
+        await asyncio.wait_for(consume_task, timeout=2.0)
+
+        # The below-threshold remainder was flushed (written) and acked before
+        # drain() returned, even though no further request ever arrived.
+        assert destination.write_calls == [[b"a", b"b"]]
+        assert len(responses) == 1
+        assert [ack.position for ack in responses[0].acks] == [b"a", b"b"]
+        assert all(ack.error == "" for ack in responses[0].acks)
+
+
+class TestDestinationBatchingHardCancel:
+    async def test_hard_cancelled_run_leaves_buffered_records_unacked(self) -> None:
+        """The documented narrow window, pinned: a hard-cancelled (not
+        drained) Run leaves buffered records un-emitted and unacked -- never
+        written, so never acked, so Conduit redelivers them (invariant 1
+        holds: nothing is acked that wasn't durably handled; invariant 3
+        holds: nothing is silently dropped)."""
+        destination = _RecordingDestination()
+        servicer = _DestinationServicer(destination, _Config)
+        await _configure(servicer, {"sdk.batch.size": "10"})
+
+        yielded = asyncio.Event()
+
+        async def request_stream() -> object:
+            yield _run_request(b"a", b"b")
+            yielded.set()
+            await asyncio.Event().wait()  # open-but-idle: never ends on its own
+
+        async def consume() -> None:
+            async for _response in servicer.Run(request_stream(), object()):
+                pass  # pragma: no cover -- below threshold, nothing is ever flushed
+
+        task = asyncio.create_task(consume())
+        await yielded.wait()  # happens-after the records are in collect_batches' buffer
+        assert destination.write_calls == []  # below threshold: not yet written
+
+        task.cancel()  # hard cancel: NOT the drain path
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+        assert destination.write_calls == []
 
 
 class TestDestinationBatchingPassthrough:
