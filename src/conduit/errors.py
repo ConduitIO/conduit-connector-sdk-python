@@ -71,10 +71,12 @@ class ConfigFieldError:
               ``"greater_than_equal"``, ``"string_type"``,
               ``"literal_error"``) -- see
               https://docs.pydantic.dev/latest/errors/validation_errors/.
-              Pydantic documents these as part of its public API and
-              guarantees they don't change silently between minor
-              versions, which is what makes them safe to assert on here
-              instead of reimplementing an equivalent taxonomy.
+              Pydantic documents these as part of its public API; treat
+              them as stable in practice (they have been for v2's
+              lifetime) rather than as a hard semver guarantee -- which
+              is what makes them safe to assert on here instead of
+              reimplementing an equivalent taxonomy. Re-verify on any
+              pydantic major-version bump.
             - For the two ``sdk.batch.*`` keys this SDK injects and parses
               itself, ahead of the connector's own pydantic model (see
               :mod:`conduit._batch`): :data:`INVALID_BATCH_SIZE_CODE`/

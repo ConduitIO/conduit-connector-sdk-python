@@ -15,8 +15,13 @@ it happens. The Go-side references this module reproduces:
   ``size`` of 0 *or* 1 with no delay is passthrough: no accumulation, no
   background task, one wire message in for one wire message out.
 - ``source_middleware.go``'s ``SourceWithBatch``/``sourceWithBatch``: the
-  same two keys on the source side, with the identical activation
-  threshold (``source_middleware.go:709``) and the same "no read-ahead
+  same two keys on the source side. Go's source-side activation
+  threshold is ``BatchSize > 0`` (``source_middleware.go:709``) -- a
+  ``size`` of exactly 1 activates Go's accumulator there -- but this SDK
+  deliberately keeps the single shared ``size > 1 || delay > 0``
+  threshold (see :attr:`BatchConfig.enabled`) for both sides: a "batch"
+  of one record is wire-indistinguishable from passthrough, so the
+  divergence is unobservable outside the SDK itself. Same "no read-ahead
   task at all when batching is off" property this module's
   :func:`collect_batches` preserves (callers only invoke it when
   :attr:`BatchConfig.enabled` is true; the disabled case never even
@@ -79,18 +84,20 @@ class BatchConfig:
             i.e. any non-negative value is legal) -- a batch then only
             flushes on the delay timer, which can produce arbitrarily
             large batches for a fast source/high-throughput destination if
-            ``delay`` is set without ``size`` (Go warns about exactly this
-            combination at ``Open`` time on both the source and
-            destination side; this SDK does not currently have an
-            established logging channel to reproduce that warning through
-            -- see the module docstring's divergence note -- so it is
-            documented here instead).
+            ``delay`` is set without ``size`` (the Go source middleware
+            warns about exactly this combination at ``Open`` time; Go's
+            destination-side warning is commented out in the current SDK
+            -- ``destination_middleware.go:167`` -- so the source side is
+            the only live warning. This SDK does not currently have an
+            established logging channel to reproduce it through -- see
+            the module docstring's divergence note -- so it is documented
+            here instead).
         delay: maximum time an incomplete batch waits before flushing.
             ``timedelta(0)`` means "no delay limit" -- a batch then only
             flushes once ``size`` items have accumulated, which can wait
             indefinitely for a slow/low-throughput source if ``size`` is
-            set without ``delay`` (the same Go warning, mirrored the same
-            way).
+            set without ``delay`` (the same source-side Go warning,
+            mirrored the same way).
     """
 
     size: int = 0
@@ -100,14 +107,18 @@ class BatchConfig:
     def enabled(self) -> bool:
         """Whether batching is actually active for this config.
 
-        The exact Go activation threshold, reproduced verbatim rather than
-        rounded to a more "intuitive" ``size >= 1``:
+        The destination side's activation threshold, reproduced verbatim
+        from Go rather than rounded to a more "intuitive" ``size >= 1``:
         ``destination.go:182``'s ``batchConfig.BatchSize > 1 ||
-        batchConfig.BatchDelay > 0`` and ``source_middleware.go:709``'s
-        identical condition. A ``size`` of exactly 1 with no delay is
-        passthrough, same as ``size == 0`` -- a "batch" of one record is
-        never observably different from no batching, so Go doesn't pay for
-        the accumulator machinery in that case, and neither does this SDK.
+        batchConfig.BatchDelay > 0``. This SDK applies the *same* single
+        threshold to the source side; Go's source threshold is the looser
+        ``BatchSize > 0`` (``source_middleware.go:709``, activating the
+        accumulator at ``size == 1``), but a "batch" of one record is
+        wire-indistinguishable from passthrough there, so this SDK does
+        not pay for the extra machinery either way -- the divergence is
+        deliberate and unobservable outside the SDK (see the module
+        docstring). A ``size`` of exactly 1 with no delay is passthrough,
+        same as ``size == 0``.
         """
         return self.size > 1 or self.delay > _ZERO_DELAY
 
@@ -274,11 +285,14 @@ async def collect_batches(
     ``RuntimeError: async generator ignored GeneratorExit``. This is a
     real, accepted narrow-window limitation, not an oversight: an
     externally-cancelled ``Run`` (e.g. the whole RPC torn down by the
-    framework, not a normal drain) can lose a buffered-but-unflushed
-    remainder the same way an in-flight, never-acked write is already an
-    accepted loss elsewhere in this SDK on a hard stop (see
+    framework, not a normal drain) can leave a buffered-but-unflushed
+    remainder un-emitted and therefore unacked -- it is *not* silently
+    dropped: nothing was acked for it, so Conduit redelivers those
+    records on the next connection (at-least-once is the floor, invariant
+    3). This is the same class of tradeoff as an in-flight write whose
+    ack never gets out on a hard stop (see
     ``conduit.destination._DestinationServicer.drain``'s own "unavoidable,
-    narrow window" note for the same class of tradeoff). The controlled
+    narrow window" note for the same reasoning). The controlled
     shutdown path -- ``drain()`` setting the stop event, which is what
     normally ends ``items`` -- goes through the flush-then-return path
     above, not this one; that's the path invariant 7 (graceful shutdown by
@@ -338,6 +352,9 @@ async def collect_batches(
                     yield buffer
                     buffer = []
                 elif config.delay > _ZERO_DELAY and delay_task is None:
+                    # `asyncio.sleep` floors sub-millisecond delays at ~1ms
+                    # vs Go's nanosecond timers -- accepted divergence,
+                    # documented at its exact point per the module docstring.
                     delay_task = asyncio.ensure_future(asyncio.sleep(config.delay.total_seconds()))
     finally:
         # Cleanup only -- deliberately no `yield` here, see docstring.
