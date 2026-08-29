@@ -188,9 +188,10 @@ faked or mocked into looking like a pass.
 See the design doc's "Open questions for DeVaris" for the full list; the ones
 this repo's existence doesn't yet resolve:
 
-1. **PyPI distribution name.** This repo uses the working name
+1. **PyPI distribution name.** ~~This repo uses the working name
    `conduit-client` in `pyproject.toml` -- not settled against
-   `conduit-embed`/bare `conduit`.
+   `conduit-embed`/bare `conduit`.~~ Settled 2026-08-29 by DeVaris:
+   `conduit-client`. Claimed permanently by the first publish.
 2. **Release target** (v0.19 fast-follow vs. v0.20 anchor).
 3. Binary provisioning here is **download-on-first-use with checksum
    verification** (not a bundled-per-platform wheel) -- lighter package,

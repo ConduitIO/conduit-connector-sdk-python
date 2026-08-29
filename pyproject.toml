@@ -12,7 +12,7 @@ name = "conduit-client"
 # NOTE: version is a placeholder until the first tagged release; the release
 # workflow will drive this from git tags (matches conduit-connector-sdk-python's
 # not-yet-automated release story).
-version = "0.1.0.dev0"
+version = "0.1.0.dev1"
 description = "Python client library for defining and running Conduit pipelines over its control-plane gRPC API."
 readme = "README.md"
 license = "Apache-2.0"
