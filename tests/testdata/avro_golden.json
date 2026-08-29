@@ -1,0 +1,45 @@
+{
+  "_provenance": {
+    "purpose": "Cross-language Avro wire-compatibility fixture for conduit.schema.AvroSchema (WS2). A Python-only round-trip is not evidence of Go interop, so both directions are recorded and independently verified: go_avro_hex is what avro.Marshal actually produces today (re-derived and compared by tools/avro_fixture_gen's verify mode, which fails CI if the committed bytes drift), and python_avro_hex is fastavro schemaless_writer output for the same value, which the same Go verifier decodes back to the expected value.",
+    "go_codec": "github.com/iskorotkov/avro/v2 v2.34.0 -- the maintained fork of hamba/avro/v2 that conduit-commons' schema/avro package (Serde) wraps directly (conduit-commons#279 replaced the archived hamba module with this fork; same codec, plain headerless Avro binary). See tools/avro_fixture_gen/main.go.",
+    "python_codec": "fastavro (schemaless_writer/schemaless_reader), v1.12.2 at generation time.",
+    "generator_note": "go_avro_hex: avro.ParseBytes(schema) + avro.Marshal(schema, value) via tools/avro_fixture_gen -emit; python_avro_hex: fastavro.schemaless_writer. Both verified by `go run . -fixture tests/testdata/avro_golden.json` (re-derives go_avro_hex and decodes python_avro_hex to the expected value). Regenerate go_avro_hex with -emit, python_avro_hex with fastavro, then run the verifier before committing.",
+    "map_nondeterminism_note": "No map field is included in this schema deliberately: Go's avro.Marshal iterates Go map entries in randomized order, so a record with a non-empty map field is nondeterministic on the Go side -- byte-compatible across languages is impossible by construction there (decode still works; this is a Go-side property, not a Python one). Array block framing below is deterministic in both encoders; maps would frame the same way.",
+    "array_framing_note": "Avro's array block framing permits two spec-legal styles: a plain positive item count, or a negative count paired with an explicit byte-size prefix (for reader skip-ahead). iskorotkov/avro (like hamba before it) emits the size-prefixed form for non-empty blocks; fastavro emits the plain form. Both are mutually decodable -- the Go verifier decodes python_avro_hex for every case, and the Python tests decode go_avro_hex -- but the two encoders' bytes are not identical for schemas containing a non-empty array field (case with_note). Case null_note has an empty array block (count 0 in either style), so it is fully byte-exact in both directions."
+  },
+  "schema_json": "{\n  \"type\": \"record\",\n  \"name\": \"OpenCDCPayload\",\n  \"namespace\": \"io.conduit.example\",\n  \"fields\": [\n    {\"name\": \"id\", \"type\": \"long\"},\n    {\"name\": \"name\", \"type\": \"string\"},\n    {\"name\": \"active\", \"type\": \"boolean\"},\n    {\"name\": \"score\", \"type\": \"double\"},\n    {\"name\": \"tags\", \"type\": {\"type\": \"array\", \"items\": \"string\"}},\n    {\"name\": \"note\", \"type\": [\"null\", \"string\"], \"default\": null}\n  ]\n}",
+  "cases": [
+    {
+      "name": "with_note",
+      "value": {
+        "id": 42,
+        "name": "widget",
+        "active": true,
+        "score": 3.14159,
+        "tags": [
+          "a",
+          "b",
+          "c"
+        ],
+        "note": "hello from go"
+      },
+      "go_avro_hex": "540c776964676574016e861bf0f9210940050c02610262026300021a68656c6c6f2066726f6d20676f",
+      "python_avro_hex": "540c776964676574016e861bf0f92109400602610262026300021a68656c6c6f2066726f6d20676f",
+      "byte_exact_encode_both_directions": false
+    },
+    {
+      "name": "null_note",
+      "value": {
+        "id": 7,
+        "name": "gadget",
+        "active": false,
+        "score": -1.5,
+        "tags": [],
+        "note": null
+      },
+      "go_avro_hex": "0e0c67616467657400000000000000f8bf0000",
+      "python_avro_hex": "0e0c67616467657400000000000000f8bf0000",
+      "byte_exact_encode_both_directions": true
+    }
+  ]
+}

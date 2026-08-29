@@ -207,3 +207,68 @@ class Metadata:
             The collection name, or ``None`` if unset.
         """
         return metadata.get(Metadata.COLLECTION)
+
+    @staticmethod
+    def set_key_schema(metadata: dict[str, str], subject: str, version: int) -> None:
+        """Set the ``opencdc.key.schema.subject``/``.version`` keys.
+
+        A record's key/payload schema is referenced by ``(subject,
+        version)``, not embedded inline -- matching ``conduit-commons``'
+        ``schema.Schema`` model (see :mod:`conduit.schema`'s module
+        docstring): the actual bytes in :attr:`Record.key` are already the
+        encoded (e.g. Avro) payload; this metadata is what a downstream
+        consumer (Conduit itself, or another connector) uses to look the
+        schema up before decoding those bytes.
+
+        Args:
+            metadata: the ``Record.metadata`` dict to mutate in place.
+            subject: the schema subject (registry-scoped name).
+            version: the schema version within that subject.
+        """
+        metadata[Metadata.KEY_SCHEMA_SUBJECT] = subject
+        metadata[Metadata.KEY_SCHEMA_VERSION] = str(version)
+
+    @staticmethod
+    def get_key_schema(metadata: Mapping[str, str]) -> tuple[str, int] | None:
+        """Read the ``opencdc.key.schema.subject``/``.version`` keys.
+
+        Returns:
+            A ``(subject, version)`` pair, or ``None`` if either key is
+            unset (both must be present for the reference to be
+            meaningful -- a subject with no version, or vice versa, isn't
+            a valid schema reference).
+        """
+        subject = metadata.get(Metadata.KEY_SCHEMA_SUBJECT)
+        version = metadata.get(Metadata.KEY_SCHEMA_VERSION)
+        if subject is None or version is None:
+            return None
+        return subject, int(version)
+
+    @staticmethod
+    def set_payload_schema(metadata: dict[str, str], subject: str, version: int) -> None:
+        """Set the ``opencdc.payload.schema.subject``/``.version`` keys.
+
+        See :meth:`set_key_schema` -- identical shape, for
+        :attr:`Change.before`/:attr:`Change.after` instead of
+        :attr:`Record.key`.
+
+        Args:
+            metadata: the ``Record.metadata`` dict to mutate in place.
+            subject: the schema subject (registry-scoped name).
+            version: the schema version within that subject.
+        """
+        metadata[Metadata.PAYLOAD_SCHEMA_SUBJECT] = subject
+        metadata[Metadata.PAYLOAD_SCHEMA_VERSION] = str(version)
+
+    @staticmethod
+    def get_payload_schema(metadata: Mapping[str, str]) -> tuple[str, int] | None:
+        """Read the ``opencdc.payload.schema.subject``/``.version`` keys.
+
+        Returns:
+            A ``(subject, version)`` pair, or ``None`` if either key is unset.
+        """
+        subject = metadata.get(Metadata.PAYLOAD_SCHEMA_SUBJECT)
+        version = metadata.get(Metadata.PAYLOAD_SCHEMA_VERSION)
+        if subject is None or version is None:
+            return None
+        return subject, int(version)
