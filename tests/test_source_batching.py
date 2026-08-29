@@ -37,11 +37,20 @@ class _CountingRecordsSource(Source[_Config]):
         self._n = n
         self._emitted = 0
         self.acked: list[bytes] = []
+        # Set after the n-th read() returns -- strictly after the first
+        # size-threshold batch was emitted (read #n comes after read #size)
+        # and happens-before the record it returned is absorbed into the
+        # batching buffer (the n-th record is yielded unconditionally:
+        # `_read_loop` re-checks the stop flag only between reads). Tests
+        # use it as the deterministic "all records have been read" barrier.
+        self.all_read = asyncio.Event()
 
     async def read(self) -> Record:
         if self._emitted >= self._n:
             raise BackoffRetry()
         self._emitted += 1
+        if self._emitted == self._n:
+            self.all_read.set()
         return Record(position=f"pos-{self._emitted}".encode(), operation=Operation.CREATE)
 
     async def ack(self, position: bytes) -> None:
@@ -115,6 +124,25 @@ class TestSourceBatchingBySize:
         assert first_batch == [b"pos-1", b"pos-2", b"pos-3"]
 
     async def test_final_partial_batch_flushes_on_stop(self) -> None:
+        """Stop() must flush the below-threshold remainder already in the
+        buffer -- asserted deterministically (regression: the old version
+        stopped on ``while not collected``, which left the stop landing
+        point anywhere between "first batch emitted" and "records 4-5 read
+        into the buffer"; on a slow/loaded runner (Windows CI 3.12) the
+        stop could land before read #4 even started, the buffer flush came
+        up empty, and the test misread correct behavior as data loss --
+        records never read are never emitted, so never acked, so Conduit
+        redelivers them from their position on the next Run, which is the
+        whole of this SDK's -- and Go's -- stop guarantee, invariant 3).
+
+        The ``all_read`` barrier is the synchronization the old test
+        lacked: read #5 has returned, so records 4-5 are in (or
+        deterministically flowing into) the batching buffer, and the
+        source never ends on its own (BackoffRetry forever), so the
+        remainder can leave the buffer only through the stop flush we are
+        about to trigger -- before Stop, nothing beyond the first batch can
+        have been emitted.
+        """
         source = _CountingRecordsSource(n=5)
         servicer = _SourceServicer(source, _Config)
         await _configure(servicer, {"sdk.batch.size": "3"})
@@ -126,16 +154,20 @@ class TestSourceBatchingBySize:
                 collected.append(response)
 
         consume_task = asyncio.create_task(consume())
-        # Wait for the first full batch of 3, then stop -- the remaining 2
-        # records are buffered but below threshold; Stop() must still flush
-        # them (invariant 3: at-least-once is the floor).
-        while not collected:  # noqa: ASYNC110 -- see tests/test_source.py's `_wait_until`
-            await asyncio.sleep(0.01)
+        await asyncio.wait_for(source.all_read.wait(), timeout=2.0)
+        # Below threshold and no trigger yet: only the first full batch has
+        # been emitted -- the remainder [4, 5] is still buffered.
+        assert [len(r.records) for r in collected] == [3]
+
         await asyncio.wait_for(servicer.Stop(object(), object()), timeout=2.0)
         await asyncio.wait_for(consume_task, timeout=2.0)
 
-        total_records = sum(len(r.records) for r in collected)
-        assert total_records == 5, "batching must never drop buffered records on stop"
+        # The buffered remainder was flushed and emitted by the stop.
+        assert [len(r.records) for r in collected] == [3, 2]
+        assert [record_from_proto(r).position for r in collected[1].records] == [
+            b"pos-4",
+            b"pos-5",
+        ]
 
     async def test_last_position_reflects_the_last_record_in_the_last_batch(self) -> None:
         source = _CountingRecordsSource(n=4)
