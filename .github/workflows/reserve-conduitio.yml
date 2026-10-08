@@ -1,0 +1,25 @@
+name: reserve-conduitio
+
+# One-off: publishes a 0.0.0 placeholder so the `conduitio` PyPI name is
+# claimed for the unified ConduitIO Python distribution (see issue #5).
+# Requires a PyPI pending publisher: project `conduitio`, owner ConduitIO,
+# repo conduit-connector-sdk-python, workflow reserve-conduitio.yml, no
+# environment. Manual trigger only.
+on:
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # Trusted Publishing (OIDC), no API token
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv build
+        working-directory: reserve/conduitio
+      - run: uv run --with twine twine check dist/*
+        working-directory: reserve/conduitio
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: reserve/conduitio/dist/

@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "conduitio"
+version = "0.0.0"
+description = "Name reserved for the ConduitIO Python SDK (connectors, processors, client). Not usable yet; see conduit-connector-sdk."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.12"
+authors = [{ name = "ConduitIO" }]
+classifiers = ["Development Status :: 1 - Planning"]
+
+[project.urls]
+Homepage = "https://github.com/ConduitIO/conduit-connector-sdk-python"
+Issues = "https://github.com/ConduitIO/conduit-connector-sdk-python/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/conduitio"]
