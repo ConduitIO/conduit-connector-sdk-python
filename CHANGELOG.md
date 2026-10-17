@@ -7,6 +7,14 @@ doc's Upgrade/rollback section for the pre-1.0 caveat).
 
 ## [Unreleased]
 
+### Changed
+
+- Merged `conduit-connector-sdk-python` and `conduit-client-python` into one
+  distribution (`conduitio` on PyPI, import package `conduit`) exposing two
+  namespaces, `conduit.connector` (the SDK) and `conduit.client` (the gRPC
+  control client), under a PEP 420 namespace package. See
+  `docs/design/20261016-python-ga-merged-distribution.md`.
+
 ### Added
 
 - Repo scaffold: `pyproject.toml` (uv/hatchling), lint/type config (ruff,

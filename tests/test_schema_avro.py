@@ -1,4 +1,4 @@
-"""Cross-language Avro wire-compatibility tests for `conduit.schema.AvroSchema`.
+"""Cross-language Avro wire-compatibility tests for `conduit.connector.schema.AvroSchema`.
 
 The property that matters for WS2 is **wire compatibility** with
 `conduit-commons`' `schema/avro` package (Go), not merely "this Python code
@@ -42,9 +42,9 @@ from typing import Any
 
 import pytest
 
-import conduit.schema as schema_module
-from conduit.record import Metadata
-from conduit.schema import AvroSchema
+import conduit.connector.schema as schema_module
+from conduit.connector.record import Metadata
+from conduit.connector.schema import AvroSchema
 
 _GOLDEN_PATH = Path(__file__).parent / "testdata" / "avro_golden.json"
 _GOLDEN: dict[str, Any] = json.loads(_GOLDEN_PATH.read_text())
@@ -243,7 +243,7 @@ class TestSchemaRegistrationAndMetadataContract:
     boundary): "registration" is the author supplying schema text, encoding
     with :class:`AvroSchema`, and recording the schema reference as
     ``opencdc.{key,payload}.schema.{subject,version}`` metadata via
-    :class:`conduit.record.Metadata`. These tests pin that contract,
+    :class:`conduit.connector.record.Metadata`. These tests pin that contract,
     including that the reference lives in metadata, not in the bytes.
     """
 

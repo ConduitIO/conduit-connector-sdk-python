@@ -1,217 +1,197 @@
-# conduit-connector-sdk (Python)
+# conduit (Python)
 
-Python SDK for building [Conduit](https://github.com/ConduitIO/conduit) source and
-destination connectors. Connectors built with this SDK run as standalone gRPC
-subprocess plugins — no changes to Conduit itself are required to run one.
+One Python distribution for [Conduit](https://github.com/ConduitIO/conduit),
+shipping two namespaces under the top-level `conduit` import package:
 
-> **Status: pre-alpha, under active development.** No release has shipped yet.
-> The public API (`Source`, `Destination`, `Config`, `Record`) is not stable
-> until the v0.19 Phase-1 acceptance criteria in
-> [`docs/design/20260707-python-connector-sdk.md`](docs/design/20260707-python-connector-sdk.md)
-> are met. Treat everything here as subject to change without a deprecation
-> notice until then.
->
-> **What "GA" means for this repo's first tagged release (v0.20 plan, WS2),
-> stated precisely so it isn't over-read:** GA here means exactly two
-> things -- the acceptance suite (`conduit.testing.acceptance`) is green in
-> CI, and a first tag is published via PyPI Trusted Publishing. It does
-> **not** mean production hardening, edge-case parity with the Go SDK, or a
-> 1.0. The value of that tag is narrow and specific: it unblocks the Rust
-> SDK build, which waits on a *tagged release* existing, not on a merge to
-> `main`. Read every claim in this README with that scope in mind.
+- **`conduit.connector`** — the connector SDK: build a source or destination
+  connector as a standalone gRPC subprocess plugin.
+- **`conduit.client`** — the gRPC control client: define and run pipelines
+  against a local or remote Conduit engine.
 
-## What this is
+`conduit` is a [PEP 420](https://peps.python.org/pep-0420/) namespace package,
+so both namespaces install together without a top-level `__init__.py`
+collision. The two pre-merge repos (`conduit-connector-sdk-python` and
+`conduit-client-python`) are one distribution before either namespace is
+tagged GA — see
+[`docs/design/20261016-python-ga-merged-distribution.md`](docs/design/20261016-python-ga-merged-distribution.md).
 
-- A gRPC client/server implementation of `conduit-connector-protocol` v2
-  (`SourcePlugin` / `DestinationPlugin` / `SpecifierPlugin`), wrapped in an
-  idiomatic Python API: `async`/`await` connector methods (with sync-method
-  auto-dispatch to a thread pool), `pydantic`-based config with automatic
-  parameter introspection, and a `bytes | dict` OpenCDC record model instead of
-  Go's `Data` interface.
-- The Python analog of [`conduit-connector-sdk`](https://github.com/ConduitIO/conduit-connector-sdk)
-  (Go). Behavioral parity is a goal; API-shape parity is not — see the design
-  doc's "Alternatives considered" section for why.
+> **Status: pre-alpha, under active development.** No release has shipped.
+> Neither namespace's public API is stable until it ships. Treat everything
+> here as subject to change without a deprecation notice until then.
 
-## Batching (`sdk.batch.size` / `sdk.batch.delay`)
+> **Distribution name.** The PyPI distribution is **`conduitio`** (the bare
+> `conduit` name was unavailable; `conduitio` is reserved via
+> `.github/workflows/reserve-conduitio.yml`). The *import package* is
+> `conduit`. `pip install conduitio`, then `import conduit.connector` /
+> `import conduit.client`.
 
-Every connector gets two SDK-injected config parameters for free -- authors
-never declare them on their own `BaseConfig` -- matching the Go SDK's
-`DestinationWithBatch`/`SourceWithBatch` middleware exactly:
+## Quickstart — connector
 
-- `sdk.batch.size` (int, default `0`): maximum records per batch before an
-  early flush.
-- `sdk.batch.delay` (Go-duration string, default `0s`): maximum time an
-  incomplete batch waits before flushing.
+```python
+from conduit.connector import BackoffRetry, Record, Source, serve
+from conduit.connector.config import BaseConfig, Field, Specification
 
-**Activation threshold, matched exactly from the Go SDK:** batching is only
-active when `size > 1` or `delay > 0`. A `size` of `0` *or* `1` with no
-delay is passthrough -- no accumulation, no background task, one wire
-message in for one wire message/record out (Go's `destination.go:182`/
-`source_middleware.go:709` condition, reproduced verbatim, not rounded to a
-more "intuitive" `size >= 1`).
 
-**On the source side**, this SDK's `Source` ABC has no `read_batch`/`ReadN`
-override point yet (deferred past this phase), so batching buffers
-individual `read()` calls -- Go's own *fallback* behavior when a connector
-doesn't implement `ReadN`, not its optimized path. This is a real, current
-capability gap versus Go, documented (not hidden) in
-`conduit/_batch.py`'s module docstring.
+class Config(BaseConfig):
+    url: str = Field(description="HTTP endpoint to poll, expects ?since=<cursor>.")
+    poll_interval_ms: int = Field(default=1000, ge=100)
 
-**On the destination side**, incoming `Run` batches are flattened and
-re-grouped by size/delay before `write()` is called -- so `write()` may now
-receive a batch spanning several incoming wire messages. A buffered-but-
-below-threshold remainder is always flushed (written and acked) when the
-stream ends or `Stop()` drains the connector -- batching never drops
-records, per invariant 3 (at-least-once is the floor).
 
-## Avro schema support
+class MySource(Source[Config]):
+    async def read(self) -> Record:
+        raise BackoffRetry()  # no new rows yet; the SDK paces retries
 
-`conduit.schema.AvroSchema` (optional -- install with
-`conduit-connector-sdk[avro]`) encodes/decodes plain, headerless Avro
-binary -- the exact wire format `conduit-commons`' `schema/avro` package
-produces via `github.com/iskorotkov/avro/v2`, the maintained fork of the
-archived `hamba/avro/v2` it adopted in #279 (**not** the Confluent Schema
-Registry wire format; there's no magic-byte/schema-ID header on either
-side). This is a cross-language compatibility claim, not a Python-only
-round-trip: the golden fixture records bytes from *both* encoders
-(`tests/testdata/avro_golden.json`), and a committed Go verifier
-(`tools/avro_fixture_gen`) re-derives the Go bytes live and confirms Go
-decodes this SDK's bytes -- see `tests/test_schema_avro.py`.
 
-`encode()` validates every value against the schema *before* writing
-bytes, with the same strictness the Go codec applies at marshal time:
-`int`/`long` fields require Python `int` (`bool` is rejected),
-`float`/`double` fields require `float`, and a key the schema has no
-field for is rejected -- never silent coercion, never a different value on
-the wire (invariant 6). fastavro by itself silently truncates some of
-these (`42.9` into a `long` writes `42`); this SDK matches the Go codec
-instead, which errors on all of them. One documented divergence: Go
-*drops* unknown record keys, this SDK rejects them with `TypeError`.
+if __name__ == "__main__":
+    serve(Specification(name="my-source", version="0.1.0", author="you"), source=MySource)
+```
 
-This SDK does **not** ship a schema registry client (no `SchemaService`
-gRPC stubs are generated) -- an author supplies schema text themselves and
-is responsible for keeping it consistent with the
-`opencdc.{key,payload}.schema.{subject,version}` record metadata (see
-`conduit.record.Metadata.set_payload_schema`/`get_payload_schema`).
+See `examples/http-poll-source/` for a fully working source, and
+`docs/design/20260707-python-connector-sdk.md` for the SDK design.
 
-## What this is not (yet)
+## Quickstart — client
 
-See the design doc's Phase 2/3 breakdown for what's still deliberately
-deferred: a `read_batch`/`ReadN` override point for source connectors (see
-"Batching" above for the current fallback-only behavior), a schema registry
-client, the acceptance-test harness's full test corpus beyond the current
-categories, and any performance claim versus the Go SDK (none ships without
-a committed `benchi` result, per the org's CLAUDE.md).
+```python
+import conduit.client as conduit
 
-## Delivery semantics
+pipeline = (
+    conduit.Pipeline("orders-sync")
+    .source("generator", settings={"format.type": "structured"}, operations="create")
+    .destination("log", level="info")
+)
 
-What this SDK guarantees, and — just as important — what it does not:
+with conduit.local(state_dir="./conduit-state") as client:
+    run = client.run(pipeline)
+    run.wait_running()
+    print(run.status())
+    run.stop()
+```
 
-**Guaranteed:**
+The client manages a **local or remote** engine over gRPC: `conduit.local()`
+downloads and supervises a pinned `conduit` binary for dev/notebooks, and
+`conduit.connect(addr)` dials an already-deployed engine for production. Only
+the Go bindings embed Conduit in-process — Python is always out-of-process,
+per `docs/design/20260724-embed-bindings-via-grpc.md`.
 
-- **At-least-once.** A source record is never acknowledged to the
-  connector's own `ack()` hook until Conduit's `Run` stream sends its
-  position back via `ack_positions` (never speculatively when the record is
-  merely produced) -- see `conduit.source._SourceServicer._consume_acks`.
-- **No silent partial-batch acking.** A destination write failure never
-  assumes an unmentioned record succeeded -- `write()` either returns
-  cleanly (full-batch success), raises `BatchWriteError` with an exhaustive,
-  construction-time-validated per-index accounting, or (any other
-  exception) nacks the *entire* batch. There is no code path that infers
-  "everything not explicitly marked as failed" succeeded — see
-  `conduit.errors.BatchWriteError` and `conduit.destination._DestinationServicer._write_batch`.
-- **Batching never drops records.** A buffered-but-below-threshold
-  remainder is always flushed (and, on the destination side, acked) before
-  a controlled shutdown (stream end, `Stop()`, or a SIGTERM-triggered
-  drain) completes.
-- **Graceful shutdown by default.** SIGTERM drains an in-flight read/write
-  loop (including any buffered batch) before `teardown()` runs, bounded by
-  a watchdog so a genuinely wedged connector still exits.
+## Requirements and support window
 
-**Not guaranteed / explicit limits:**
-
-- **Positions/state are the connector author's responsibility.** This SDK
-  round-trips whatever `bytes` a `Source.read()`/`open()` implementation
-  returns; it does not itself provide crash-safe position storage.
-- **A hard-cancelled (not drained) `Run` can lose a buffered-but-unflushed
-  batching remainder.** The controlled shutdown paths above (stream end,
-  `Stop()`, SIGTERM-triggered drain) all flush correctly; an externally
-  torn-down RPC (e.g. the framework cancelling the whole call, not a normal
-  drain) is a documented, narrow-window exception -- see
-  `conduit._batch.collect_batches`'s docstring for exactly why and how this
-  mirrors an already-accepted tradeoff elsewhere in this SDK (an in-flight,
-  never-acked write on a hard stop).
-- **No exactly-once.** Like the Go SDK, redelivery on restart is possible;
-  connectors must tolerate at-least-once delivery.
-- **Structured (`dict`) payloads lose precision on integers beyond `2**53`**
-  (via `google.protobuf.Struct`'s double-precision representation) --
-  silently, by design of the wire format, not a bug in this SDK. Pinned by
-  `tests/test_record_codec.py`.
-- **No schema registry integration, no schema evolution/compatibility
-  checking** -- see "Avro schema support" above.
-
-## Requirements
-
-- Python 3.11+
+- **Python 3.11+** (`requires-python = ">=3.11"`, enforced at install).
 - [`uv`](https://docs.astral.sh/uv/) for dependency management (recommended;
-  `pip install -e .[dev]` also works)
+  `pip install -e .[dev]` also works).
+
+**Support window.** We support the current and two preceding CPython feature
+releases, with a floor of 3.11 today. CI tests the two most recent minors
+(currently 3.12 and 3.13); the floor advances by one minor when the oldest
+supported minor reaches upstream CPython end-of-life, announced in the
+changelog at least one minor release ahead. A breaking change to *either*
+namespace bumps the one shared semantic version.
 
 ## Repo layout
 
 ```text
-src/conduit/
-  __init__.py       # public API surface
-  config.py         # BaseConfig, Field, to_parameters()
-  record.py          # Record / Change / Operation / Metadata
-  schema.py           # AvroSchema -- optional, `conduit-connector-sdk[avro]`
-  source.py             # Source ABC
-  destination.py         # Destination ABC
-  _batch.py                # sdk.batch.size/delay middleware (source + destination)
-  serve.py                   # handshake + gRPC server bootstrap
-  _handshake.py                # magic cookie, protocol negotiation, stdout line
-  _build.py                      # `conduit-connector-sdk build` implementation
-  _cli.py                          # `conduit-connector-sdk` console-script entry point
-  _grpc/                             # generated protobuf/grpc stubs (buf generate output)
-  testing/                            # acceptance-test harness (acceptance.py, fixtures.py)
-examples/http-poll-source/             # worked example connector
-docs/design/                             # design docs for this repo
-tests/                                     # unit tests
+src/conduit/                    # PEP 420 namespace package (no __init__.py)
+  _version.py                   # single shared __version__
+  connector/                    # conduit.connector — the SDK
+    __init__.py                 # public API surface (Source, Destination, Record, ...)
+    source.py destination.py    # Source/Destination ABCs + gRPC servicers
+    record.py schema.py config.py serve.py errors.py
+    _batch.py                   # sdk.batch.size/delay middleware (source + destination)
+    _handshake.py               # go-plugin magic cookie + protocol negotiation
+    _build.py _cli.py           # `conduit-connector-sdk build` implementation
+    testing/                    # acceptance-test harness (acceptance.py, fixtures.py)
+  client/                       # conduit.client — the control client
+    __init__.py                 # Pipeline, local, connect, Client, Run, RunStatus
+    pipeline.py client.py run.py errors.py
+    _local.py _provision.py     # binary provisioning + subprocess supervision
+  _grpc/                        # generated protobuf/grpc stubs (buf generate output)
+examples/                       # worked example connector + client quickstart
+docs/design/                    # design docs for both namespaces
+tests/                          # SDK unit tests
+tests/client/                   # client unit + integration tests
 ```
 
-## Building a standalone connector artifact
+## The connector SDK (`conduit.connector`)
 
-Conduit launches a standalone connector as a subprocess with a **clean
-environment** — no inherited `PATH` (design doc §1.1.6). A `pip
-install`-then-shebang-script connector (`#!/usr/bin/env python3`, or an
-activated venv) cannot launch this way: there's no `PATH` for `env` to
-search. `conduit-connector-sdk build` closes that gap:
+A gRPC client/server implementation of `conduit-connector-protocol` v2
+(`SourcePlugin` / `DestinationPlugin` / `SpecifierPlugin`), wrapped in an
+idiomatic Python API: `async`/`await` connector methods (with sync-method
+auto-dispatch to a thread pool), `pydantic`-based config with automatic
+parameter introspection, and a `bytes | dict` OpenCDC record model.
+
+- **Batching** (`sdk.batch.size` / `sdk.batch.delay`) is injected on every
+  connector, matching the Go SDK's `DestinationWithBatch`/`SourceWithBatch`
+  middleware. Batching never drops records (invariant 3).
+- **Avro schema support** (`conduit.connector.schema.AvroSchema`, install with
+  `conduitio[avro]`) encodes/decodes plain, headerless Avro binary, wire-
+  compatible with `conduit-commons`' `schema/avro` package.
+- **Acceptance suite** (`conduit.connector.testing.acceptance`) is the shared
+  contract a connector must pass — versioned (`CONTRACT_VERSION`), runnable
+  in-process in a connector's own `pytest` module.
+
+### Building a standalone connector artifact
+
+Conduit launches a standalone connector with a **clean environment** — no
+inherited `PATH`. `conduit-connector-sdk build` packages a connector into one
+directly-executable file with an absolute interpreter shebang and every
+third-party dependency vendored:
 
 ```shell
 conduit-connector-sdk build examples/http-poll-source -o http-poll-source.pyz
-./http-poll-source.pyz   # directly executable — no `python` prefix, no venv activation
+./http-poll-source.pyz
 ```
 
-This produces one file with an **absolute** interpreter shebang (resolved
-at build time, never looked up via `PATH`), bundling every third-party
-dependency your connector needs — including compiled-extension
-dependencies like `grpcio`/`pydantic`'s `pydantic-core`, which a plain
-[`zipapp`](https://docs.python.org/3/library/zipapp.html) can't load
-in-place: the artifact extracts itself to a per-build cache directory on
-first run (the same fundamental approach `shiv`/`pex` use), then executes
-your connector's real entry point from those extracted files. Later
-launches of the same build reuse the cache.
+Run `build` from an environment where the connector's own dependencies are
+already installed (it vendors what's resolved, not a fresh `pip install`).
 
-**Precondition:** run `build` from an environment where your connector's
-own dependencies are already installed (however you installed them — pip,
-uv, poetry) — it vendors from what's already resolved, not a fresh
-`pip install`. See `conduit/_build.py`'s module docstring for the full
-rationale and known limitations.
+### Delivery semantics
+
+**Guaranteed:** at-least-once (a source record is acked only after Conduit's
+`ack_positions` returns its position); no silent partial-batch acking;
+batching never drops records; graceful shutdown by default (SIGTERM drains
+in-flight work, bounded by a hung-loop watchdog).
+
+**Not guaranteed:** exactly-once (redelivery on restart is possible);
+crash-safe position storage (that's the connector author's responsibility —
+the SDK round-trips whatever `bytes` the source returns); structured payloads
+lose integer precision beyond `2**53` (the wire format's `Struct` is double-
+precision, by design).
+
+## The client (`conduit.client`)
+
+A sync gRPC client over Conduit's control-plane API (`proto/api/v1/api.proto`).
+Slice 1 (Case A: named connector plugins only):
+
+- `conduit.Pipeline(id).source(...).destination(...).process(...).dlq(...)` —
+  a builder producing exact `PipelineService`/`ConnectorService`/
+  `ProcessorService` payloads.
+- `conduit.connect(addr)` — dial an already-running engine (production shape).
+- `conduit.local(...)` — provision, spawn, and supervise a pinned `conduit`
+  binary (dev/notebook shape). **Not a production story** — no independent
+  lifecycle.
+- Errors are always `conduit.client.ConduitError` (stable code, message, and
+  optional config path/suggestion), never a raw `grpc.RpcError`.
+
+`inline_source`/`inline_destination` (Case B, driving a host-implemented
+Python connector) is a later slice, not built here.
+
+## Testing
+
+```bash
+uv sync --all-extras
+uv run pytest -v                      # unit tests (SDK + client); no network
+uv run pytest -v -m integration       # spins up a real conduit binary end-to-end
+```
+
+The integration test (`tests/client/integration/test_local_generator_log.py`)
+runs `conduit.local()` for real against a `generator -> log` pipeline. It
+downloads a real release binary on first use — if the sandbox has no network,
+it is honestly marked `skip` with the reason stated, never faked.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). This SDK sits on Conduit's data path —
-read [`docs/design/20260707-python-connector-sdk.md`](docs/design/20260707-python-connector-sdk.md)
-before proposing changes to the wire adapter, ack/nack logic, or handshake.
+See [CONTRIBUTING.md](CONTRIBUTING.md). The connector SDK sits on Conduit's
+data path — read `docs/design/20260707-python-connector-sdk.md` before
+proposing changes to the wire adapter, ack/nack logic, or handshake.
 
 ## License
 

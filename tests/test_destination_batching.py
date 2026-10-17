@@ -18,9 +18,9 @@ import contextlib
 import pytest
 
 import conduit._grpc  # noqa: F401  -- sets up sys.path, see conduit._grpc.__init__
-from conduit.config import BaseConfig
-from conduit.destination import Destination, _DestinationServicer
-from conduit.record import Operation, Record
+from conduit.connector.config import BaseConfig
+from conduit.connector.destination import Destination, _DestinationServicer
+from conduit.connector.record import Operation, Record
 from connector.v2 import destination_pb2
 from opencdc.v1 import opencdc_pb2
 
@@ -110,7 +110,7 @@ class TestDestinationBatchingBySize:
 
     async def test_partial_write_failure_nacks_correctly_across_a_combined_batch(self) -> None:
         """B1 applies identically when the failed batch spans two incoming wire messages."""
-        from conduit.errors import BatchWriteError
+        from conduit.connector.errors import BatchWriteError
 
         class _PartialWriteDestination(Destination[_Config]):
             async def write(self, records: list[Record]) -> None:

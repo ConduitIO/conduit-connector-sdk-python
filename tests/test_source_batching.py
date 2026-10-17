@@ -19,10 +19,10 @@ import pytest
 
 import conduit._grpc  # noqa: F401  -- sets up sys.path, see conduit._grpc.__init__
 from conduit._grpc.adapters import record_from_proto
-from conduit.config import BaseConfig
-from conduit.errors import BackoffRetry
-from conduit.record import Operation, Record
-from conduit.source import Source, _SourceServicer
+from conduit.connector.config import BaseConfig
+from conduit.connector.errors import BackoffRetry
+from conduit.connector.record import Operation, Record
+from conduit.connector.source import Source, _SourceServicer
 from connector.v2 import source_pb2
 
 

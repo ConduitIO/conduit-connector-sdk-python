@@ -24,8 +24,11 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-from conduit.config import Specification
-from conduit.testing.acceptance import AcceptanceTestSuite, ConfigurableAcceptanceTestDriver
+from conduit.connector.config import Specification
+from conduit.connector.testing.acceptance import (
+    AcceptanceTestSuite,
+    ConfigurableAcceptanceTestDriver,
+)
 
 _EXAMPLE_MAIN = Path(__file__).resolve().parent.parent / "examples" / "http-poll-source" / "main.py"
 

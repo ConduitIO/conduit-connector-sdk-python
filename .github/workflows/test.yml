@@ -6,13 +6,13 @@ on:
   pull_request:
 
 jobs:
-  test:
+  unit:
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        # Two most recent CPython minors on the 3.11+ floor, per
-        # docs/design/20260707-python-connector-sdk.md §3 (CI matrix).
+        # Two most recent CPython minors on the 3.11+ floor (see README
+        # "Requirements and support window").
         python-version: ["3.12", "3.13"]
     runs-on: ${{ matrix.os }}
     steps:
@@ -22,4 +22,20 @@ jobs:
           enable-cache: true
           python-version: ${{ matrix.python-version }}
       - run: uv sync --all-extras
-      - run: uv run pytest -v
+      # Unit tests only (SDK + client): no network, no real subprocess. The
+      # client integration test is marked `integration` and excluded here.
+      - run: uv run pytest -v -m "not integration"
+
+  integration:
+    # Spins up a real conduit binary via conduit.client.local() -- needs
+    # network access to GitHub Releases on first run. Ubuntu only: the unit
+    # matrix already exercises cross-platform archive naming via the mocked
+    # download tests; this job proves the real download+launch path once.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --all-extras
+      - run: uv run pytest -v -m integration

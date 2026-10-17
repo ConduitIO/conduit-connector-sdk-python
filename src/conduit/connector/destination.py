@@ -1,0 +1,506 @@
+"""Destination connector base class + the ``DestinationPlugin`` gRPC adapter.
+
+See ``docs/design/20260707-python-connector-sdk.md`` §2.1 (async/dual-mode),
+§2.4 (forward-compatible ABC), and **§2.5 (the B1 fix -- the single most
+important correctness property in this repo)**. This module holds both
+halves: the author-facing :class:`Destination` ABC, and the internal
+:class:`_DestinationServicer` adapting it to the generated
+``DestinationPluginServicer``.
+
+**B1, restated precisely at its enforcement site (see
+:meth:`_DestinationServicer._write_batch`):** a naive translation of "catch
+the first exception, treat every index not present in the exception's map
+as successful" is the exact bug Go's ``(n, err)`` contract has to defend
+against at runtime (``destination.go:345-350``, re-verified ▶ MUST-FIX 1) --
+"absence of an error entry" read as "acked" is a direct invariant 1/3
+violation (a record never durably written gets acked). This module's write
+adapter never does that: every ack decision is driven by
+:class:`~conduit.connector.errors.BatchWriteError`'s own exhaustive, construction-time-
+validated accounting (see :mod:`conduit.connector.errors`), or -- for any other
+exception -- nacks the entire batch outright.
+"""
+
+from __future__ import annotations
+
+import abc
+import asyncio
+from collections.abc import AsyncIterator, Sequence
+from typing import Any, Generic, TypeVar
+
+import grpc
+import grpc.aio
+import pydantic
+
+import conduit._grpc  # noqa: F401  -- sets up sys.path, see conduit._grpc.__init__
+from conduit._grpc.adapters import config_map_from_proto, records_from_proto
+from conduit.connector._batch import BatchConfig, collect_batches, extract_batch_config
+from conduit.connector._dispatch import invoke
+from conduit.connector._introspect import resolve_config_class
+from conduit.connector.config import BaseConfig
+from conduit.connector.errors import BatchWriteError, ConfigValidationError, format_validation_error
+from conduit.connector.record import Record
+from connector.v2 import destination_pb2, destination_pb2_grpc
+
+ConfigT = TypeVar("ConfigT", bound=BaseConfig)
+
+Ack = destination_pb2.Destination.Run.Response.Ack
+
+
+class Destination(abc.ABC, Generic[ConfigT]):
+    """Base class for Conduit destination connectors.
+
+    Subclass this, parameterized with your
+    :class:`~conduit.connector.config.BaseConfig` subclass, and override
+    :meth:`write` at minimum. Every other method has a working default, per
+    the same forward-compatible-ABC rationale as :class:`~conduit.connector.source.Source`
+    (§2.4).
+
+    Methods are declared ``async def``; a sync ``def`` override runs in a
+    thread-pool executor -- see :mod:`conduit.connector._dispatch` (§2.1).
+    """
+
+    config: ConfigT
+    """The validated config instance, set by :meth:`configure` (default
+    implementation) before :meth:`open` is called."""
+
+    async def configure(self, config: ConfigT) -> None:
+        """Receive and store the validated config. Default: ``self.config = config``.
+
+        Args:
+            config: the parsed, pydantic-validated config instance.
+        """
+        self.config = config
+
+    async def open(self) -> None:
+        """Prepare to start writing records (e.g. open connections). Default: no-op."""
+        return None
+
+    @abc.abstractmethod
+    async def write(self, records: list[Record]) -> None:
+        """Durably write every record in ``records``, in order.
+
+        Full success is "returns without raising." A partial-batch failure
+        raises :class:`~conduit.connector.errors.BatchWriteError` -- typically via
+        ``raise BatchWriteError.partial(len(records), written=N, cause=exc)``,
+        the recommended constructor (see :meth:`~conduit.connector.errors.BatchWriteError.partial`),
+        rather than hand-building the exhaustive index accounting yourself.
+        Any other exception is treated by the SDK's adapter as a failure of
+        the **entire** batch (see :meth:`_DestinationServicer._write_batch`)
+        -- there is no partial-credit interpretation of a plain exception.
+
+        The one genuinely required override (§2.4) -- ``abc.ABC`` refuses
+        to instantiate a subclass that doesn't provide it.
+
+        Args:
+            records: the batch to write, in the order Conduit sent them.
+
+        Raises:
+            conduit.connector.errors.BatchWriteError: on a partial-batch failure, with
+                an exhaustive per-index accounting.
+        """
+        raise NotImplementedError("Destination subclasses must override write()")
+
+    async def teardown(self) -> None:
+        """Called once, after the write loop stops, before process exit. Default: no-op."""
+        return None
+
+    async def on_created(self, config: dict[str, str]) -> None:
+        """Called once, the first time this connector instance is ever run. Default: no-op."""
+        return None
+
+    async def on_updated(self, config_before: dict[str, str], config_after: dict[str, str]) -> None:
+        """Called when the connector's configuration changed since the last run. Default: no-op."""
+        return None
+
+    async def on_deleted(self, config: dict[str, str]) -> None:
+        """Called once, when this connector instance was deleted. Default: no-op."""
+        return None
+
+
+class _DestinationServicer(destination_pb2_grpc.DestinationPluginServicer):
+    """Adapts a :class:`Destination` instance to the generated servicer.
+
+    Internal; constructed by :func:`conduit.connector.serve.serve`, never by
+    connector authors directly.
+    """
+
+    def __init__(self, destination: Destination[Any], config_cls: type[BaseConfig]) -> None:
+        """Wrap a connector instance for gRPC dispatch.
+
+        Args:
+            destination: the author's ``Destination`` instance. Typed
+                ``Destination[Any]`` (not ``Destination[BaseConfig]``)
+                deliberately: generics are invariant in Python's type
+                system, so a concrete ``Destination[MyConfig]`` instance is
+                not otherwise assignable here; ``config_cls`` (below) is
+                what actually drives config validation, independent of
+                this parameter's type.
+            config_cls: the concrete :class:`~conduit.connector.config.BaseConfig`
+                subclass to validate ``Configure``'s config map against.
+        """
+        self._destination = destination
+        self._config_cls = config_cls
+        self._stop_event = asyncio.Event()
+        self._stopped_event = asyncio.Event()
+        self._run_started = False
+        self._batch_config = BatchConfig()
+        """`sdk.batch.size`/`sdk.batch.delay`, set by `Configure` -- see
+        `conduit.connector._batch.extract_batch_config`. Defaults to the disabled
+        (passthrough) config so a servicer driven directly in tests
+        without ever calling `Configure` (see e.g.
+        `tests/test_destination.py`) keeps today's exact unbatched
+        behavior."""
+
+    async def Configure(
+        self,
+        request: destination_pb2.Destination.Configure.Request,
+        context: grpc.aio.ServicerContext[Any, Any],
+    ) -> destination_pb2.Destination.Configure.Response:
+        """Validate and store the plugin's config.
+
+        Two validation passes, both surfaced as ``INVALID_ARGUMENT`` with a
+        per-field detail message, in order:
+
+        1. :func:`~conduit.connector._batch.extract_batch_config` pulls
+           ``sdk.batch.size``/``sdk.batch.delay`` out of the raw map --
+           these are SDK-owned keys, never part of the connector's own
+           :class:`~conduit.connector.config.BaseConfig` (see :mod:`conduit.connector._batch`).
+           A malformed value here raises
+           :class:`~conduit.connector.errors.ConfigValidationError`.
+        2. The remaining map is validated against the connector's own
+           config class; a ``pydantic.ValidationError`` here is the
+           existing path -- see
+           :meth:`conduit.connector.source._SourceServicer.Configure` for the same
+           rationale (kept in sync with this one).
+        """
+        raw = config_map_from_proto(request.config)
+        try:
+            batch_config, remaining = extract_batch_config(raw)
+        except ConfigValidationError as exc:
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
+            raise  # pragma: no cover -- abort() never returns; unreachable, satisfies mypy
+        try:
+            config = self._config_cls.model_validate(remaining)
+        except pydantic.ValidationError as exc:
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, format_validation_error(exc))
+            raise  # pragma: no cover -- abort() never returns; unreachable, satisfies mypy
+        self._batch_config = batch_config
+        await invoke(self._destination.configure, config)
+        return destination_pb2.Destination.Configure.Response()
+
+    async def Open(
+        self, request: destination_pb2.Destination.Open.Request, context: object
+    ) -> destination_pb2.Destination.Open.Response:
+        """Prepare the destination to start writing records."""
+        await invoke(self._destination.open)
+        return destination_pb2.Destination.Open.Response()
+
+    async def Run(
+        self,
+        request_iterator: AsyncIterator[destination_pb2.Destination.Run.Request],
+        context: object,
+    ) -> AsyncIterator[destination_pb2.Destination.Run.Response]:
+        """Bidirectional stream: consume record batches in, emit acks out.
+
+        **Passthrough (``not self._batch_config.enabled``, the default and
+        today's only behavior before WS2's ``sdk.batch.*`` support):** each
+        incoming ``Destination.Run.Request`` (a batch of records) is
+        written via :meth:`_write_batch` and immediately followed by a
+        ``Destination.Run.Response`` carrying one ack per record in that
+        batch, in the same order -- there is no cross-batch buffering here,
+        keeping the ack/write relationship for a given batch entirely
+        local to one iteration of this loop.
+
+        **Batching enabled (``sdk.batch.size > 1`` or ``sdk.batch.delay >
+        0``, see :mod:`conduit.connector._batch`):** incoming batches are flattened
+        to a per-record stream (:meth:`_flatten_incoming`) and re-grouped
+        by :func:`~conduit.connector._batch.collect_batches` into size/delay-bounded
+        batches, each written and acked the same way -- one
+        ``Destination.Run.Response`` per *emitted* batch, which may now
+        span several incoming wire messages (or be a fragment of one),
+        exactly Go's ``writeStrategyBatch`` behavior
+        (``destination.go:372-458``).
+
+        The ``try``/``finally`` (setting ``_stopped_event``) mirrors
+        :meth:`conduit.connector.source._SourceServicer.Run`'s structure exactly, for
+        the same reason: it's what lets :meth:`drain` block until this
+        generator has actually finished -- including yielding (to the
+        framework) whatever ack response was already computed for the
+        in-flight batch -- rather than only until ``write()`` itself
+        returns, which would let ``conduit.connector.serve``'s SIGTERM path tear the
+        server down (``server.stop()``) before that already-earned ack had
+        a chance to reach Conduit. In the batching case this also covers
+        flushing (and acking) any buffered-but-not-yet-size/delay-triggered
+        remainder -- see :func:`~conduit.connector._batch.collect_batches`'s
+        flush-on-end behavior, which :meth:`_flatten_incoming` ending
+        (stream EOF or the stop-event check below) triggers.
+        """
+        self._run_started = True
+        try:
+            if self._batch_config.enabled:
+                async for batch in collect_batches(
+                    self._flatten_incoming(request_iterator), config=self._batch_config
+                ):
+                    acks = await self._write_batch(batch)
+                    yield destination_pb2.Destination.Run.Response(acks=acks)
+            else:
+                async for request in request_iterator:
+                    if self._stop_event.is_set():
+                        # A SIGTERM-triggered drain (see `drain`, below)
+                        # asked the write loop to stop accepting new
+                        # batches. Conduit's deterministic `Stop` RPC path
+                        # gets this for free -- it simply stops sending
+                        # requests after calling `Stop` -- but a SIGTERM
+                        # can land mid-`Run` with more batches already
+                        # queued on the stream, so this check is what makes
+                        # the "no new write starts after the drain point"
+                        # half of `drain`'s contract actually hold.
+                        break
+                    records = records_from_proto(request.records)
+                    acks = await self._write_batch(records)
+                    yield destination_pb2.Destination.Run.Response(acks=acks)
+        finally:
+            self._stopped_event.set()
+
+    async def _flatten_incoming(
+        self, request_iterator: AsyncIterator[destination_pb2.Destination.Run.Request]
+    ) -> AsyncIterator[Record]:
+        """Yield individual records from incoming ``Run`` requests, respecting the drain flag.
+
+        Feeds :func:`~conduit.connector._batch.collect_batches` a plain per-record
+        stream so it doesn't need to know anything about the wire message
+        shape -- the same flattening Go's ``writeStrategyBatch`` gets for
+        free from ``internal.Batcher.Enqueue(item, size)`` accepting a
+        whole incoming slice at once (``destination.go:424-427``); here the
+        flattening is explicit since :func:`~conduit.connector._batch.collect_batches`
+        counts items, not incoming-message sizes.
+
+        Ending this generator (returning) is exactly what makes
+        :func:`~conduit.connector._batch.collect_batches` flush and yield any
+        buffered remainder before *it* ends -- both the ordinary
+        stream-EOF case and the ``_stop_event``-set drain case go through
+        this one exit path, so both get that flush for free rather than
+        needing two separate flush call sites.
+
+        The drain case is why this races ``__anext__`` against
+        ``_stop_event.wait()`` instead of checking the flag after each
+        request the way :meth:`Run`'s passthrough branch does: with
+        batching on, a below-threshold remainder can be sitting in
+        :func:`~conduit.connector._batch.collect_batches`'s buffer on an
+        otherwise-idle stream, and a ``drain()`` (SIGTERM) that lands then
+        must still flush it. ``asyncio.wait`` over the two makes the idle
+        stream interruptible, so the stop is observed within one
+        event-loop iteration instead of only after the next request
+        arrives -- without it, ``drain()`` would block forever on
+        ``_stopped_event`` and the shutdown watchdog would force-exit
+        with records never written or acked (invariants 7 and 3). Once
+        the stop is observed, the top-of-loop check returns without
+        creating the next ``__anext__``, so a continuously-writing
+        client can't keep the drain window open indefinitely -- only a
+        request already pulled off the wire at that instant is still
+        processed (the ``next_request.done()`` branch). The
+        source side has no such gap (``_read_loop`` observes
+        ``_stop_event`` inside its own loop -- see ``conduit.connector.source``);
+        that asymmetry is deliberate, and the passthrough branch's
+        pre-existing check-after-request behavior is unchanged.
+        """
+        stop_wait = asyncio.ensure_future(self._stop_event.wait())
+        next_request: asyncio.Task[destination_pb2.Destination.Run.Request] | None = None
+        try:
+            while True:
+                if self._stop_event.is_set():
+                    # A drain landed: don't even create the next `__anext__`,
+                    # so a continuously-writing client can't keep this loop
+                    # pulling records until it pends (bounded only by the
+                    # shutdown watchdog). At most one request already pulled
+                    # off the wire when the stop became visible still flows
+                    # through the `next_request.done()` branch below -- the
+                    # narrow "already in flight" window `drain` documents.
+                    # Any records buffered in `collect_batches` are flushed
+                    # and acked when this generator returns.
+                    return
+                if next_request is None:
+                    next_request = asyncio.ensure_future(request_iterator.__anext__())
+                waiters: set[asyncio.Task[object]] = {next_request, stop_wait}
+                await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+                if next_request.done():
+                    # A request already pulled off the wire wins over a
+                    # simultaneously-set stop -- the same "batch already in
+                    # flight still starts" narrow window `drain` documents.
+                    try:
+                        request = next_request.result()
+                    except StopAsyncIteration:
+                        # The wire stream ended -- the equivalent of `async
+                        # for`'s implicit stop. Returning lets
+                        # `collect_batches` flush the buffered remainder
+                        # (flush-on-end). (Re-raising StopAsyncIteration
+                        # from inside this generator would be a PEP 479
+                        # RuntimeError.)
+                        return
+                    next_request = None
+                    for record in records_from_proto(request.records):
+                        yield record
+                    continue
+                # Only the stop event fired: the stream is idle (or a
+                # request is still pending), so stop pulling records off
+                # it. The pending `next_request`, if any, is cancelled in
+                # the `finally` below -- buffered records are flushed and
+                # acked by `collect_batches` when this generator returns.
+                return
+        finally:
+            if next_request is not None and not next_request.done():
+                next_request.cancel()
+            if not stop_wait.done():
+                stop_wait.cancel()
+
+    async def _write_batch(self, records: Sequence[Record]) -> list[Ack]:
+        """Call ``write()`` and translate the outcome into per-record acks.
+
+        This is the B1 enforcement site: every ack decision below is driven
+        either by ``write()`` returning cleanly (full-batch success) or by
+        :class:`~conduit.connector.errors.BatchWriteError`'s own exhaustive, already-
+        validated ``success``/``failures`` accounting -- never by assuming
+        an unmentioned index succeeded.
+        """
+        try:
+            await invoke(self._destination.write, list(records))
+        except BatchWriteError as exc:
+            return self._acks_from_batch_write_error(records, exc)
+        except Exception as exc:
+            # Invariant 1 / B1: any exception other than BatchWriteError
+            # carries no per-index accounting at all, so the adapter cannot
+            # assume *any* record in this batch was durably written. Nack
+            # the entire batch rather than guessing a partial success.
+            return [Ack(position=r.position, error=str(exc)) for r in records]
+        # Invariant 1: ack only reached here, after `write()` returned
+        # without raising for every record in this batch -- full-batch
+        # success, the only case where every ack carries no error.
+        return [Ack(position=r.position, error="") for r in records]
+
+    def _acks_from_batch_write_error(
+        self, records: Sequence[Record], exc: BatchWriteError
+    ) -> list[Ack]:
+        """Build one ack per record from a validated ``BatchWriteError``.
+
+        ``exc.success``/``exc.failures`` were already checked exhaustive
+        and disjoint at ``BatchWriteError.__init__`` time (see
+        :mod:`conduit.connector.errors`) -- this method has no code path that
+        computes "ack everything not explicitly marked as failed": the
+        ``else`` branch below only runs for the (should-be-impossible,
+        defense-in-depth) case of an index outside both sets, and even then
+        it nacks, it never acks.
+        """
+        acks: list[Ack] = []
+        for i, record in enumerate(records):
+            if i in exc.success:
+                # Invariant 1: explicitly accounted as successfully,
+                # durably written by write() -- ack.
+                acks.append(Ack(position=record.position, error=""))
+            else:
+                # Invariant 1 / B1 fail-closed fix: every other index --
+                # whether explicitly in `exc.failures`, or (defensively)
+                # absent from both accountings entirely, which
+                # BatchWriteError's own constructor should already have
+                # rejected -- is nacked, never assumed successful. Mirrors
+                # destination.go:345-350's defensive re-check.
+                reason = exc.failures.get(
+                    i, RuntimeError(f"index {i} unaccounted for in BatchWriteError")
+                )
+                acks.append(Ack(position=record.position, error=str(reason)))
+        return acks
+
+    async def Stop(
+        self, request: destination_pb2.Destination.Stop.Request, context: object
+    ) -> destination_pb2.Destination.Stop.Response:
+        """Acknowledge the last record Conduit will send; nothing further to do here.
+
+        The destination has no read-loop analog to halt -- ``Run``'s
+        request stream simply ends after this record, which is Conduit's
+        own responsibility, not this servicer's. (Go's destination-side
+        ``Stop`` actively flushes any buffered batch --
+        ``destination.go:271-272``; the Python equivalent of that flush is
+        the batching path's flush-on-stream-end, which the wire contract
+        delivers via the stream ending after ``Stop``. Equivalent under
+        today's wire contract, but a future protocol change that decouples
+        the two must revisit this.)
+        """
+        return destination_pb2.Destination.Stop.Response()
+
+    async def drain(self) -> None:
+        """Stop accepting new write batches and await any write already in flight.
+
+        Invariant 7 (graceful shutdown by default) enforcement site: called
+        by ``conduit.connector.serve``'s SIGTERM handler before ``teardown()`` runs, so
+        an in-flight ``write()`` is never raced against ``teardown()``
+        closing a resource (e.g. a DB pool) the write is still using.
+
+        Mirrors :meth:`conduit.connector.source._SourceServicer.drain`'s exact
+        stop-then-wait shape: sets the stop flag :meth:`Run` checks before
+        starting each new batch (see the enforcement site there), then --
+        if ``Run`` was ever invoked -- awaits ``_stopped_event``, which
+        :meth:`Run`'s ``finally`` only sets once its generator has fully
+        finished. That is deliberately stronger than merely waiting for
+        ``write()`` to return: it also covers the already-computed ack
+        response for the in-flight batch being handed back to the ``grpc.aio``
+        framework (the ``yield`` right after ``write()`` returns), so
+        ``conduit.connector.serve``'s subsequent ``server.stop()`` doesn't abort a
+        response that was already earned. If ``Run`` was never invoked
+        (e.g. SIGTERM arrives before Conduit ever calls it), this returns
+        immediately -- there is no write loop to wait for.
+
+        There is an unavoidable, narrow window between :meth:`Run` checking
+        ``_stop_event`` and this method setting it: a batch already pulled
+        off the request stream at that instant still starts its write. This
+        mirrors a window invariant 1/3 already tolerate elsewhere -- a write
+        already committed to starting is allowed to finish, never torn
+        mid-flight -- so this method stops *new* batches after the one
+        already in flight; it does not attempt mid-write cancellation, which
+        would itself violate invariant 1/3 (a torn write can't be safely
+        un-started).
+        """
+        self._stop_event.set()
+        if self._run_started:
+            await self._stopped_event.wait()
+
+    async def Teardown(
+        self, request: destination_pb2.Destination.Teardown.Request, context: object
+    ) -> destination_pb2.Destination.Teardown.Response:
+        """Run the connector's teardown hook to completion."""
+        await invoke(self._destination.teardown)
+        return destination_pb2.Destination.Teardown.Response()
+
+    async def LifecycleOnCreated(
+        self, request: destination_pb2.Destination.Lifecycle.OnCreated.Request, context: object
+    ) -> destination_pb2.Destination.Lifecycle.OnCreated.Response:
+        """Dispatch the connector's first-run lifecycle hook."""
+        await invoke(self._destination.on_created, config_map_from_proto(request.config))
+        return destination_pb2.Destination.Lifecycle.OnCreated.Response()
+
+    async def LifecycleOnUpdated(
+        self, request: destination_pb2.Destination.Lifecycle.OnUpdated.Request, context: object
+    ) -> destination_pb2.Destination.Lifecycle.OnUpdated.Response:
+        """Dispatch the connector's config-changed lifecycle hook."""
+        await invoke(
+            self._destination.on_updated,
+            config_map_from_proto(request.config_before),
+            config_map_from_proto(request.config_after),
+        )
+        return destination_pb2.Destination.Lifecycle.OnUpdated.Response()
+
+    async def LifecycleOnDeleted(
+        self, request: destination_pb2.Destination.Lifecycle.OnDeleted.Request, context: object
+    ) -> destination_pb2.Destination.Lifecycle.OnDeleted.Response:
+        """Dispatch the connector's deleted lifecycle hook."""
+        await invoke(self._destination.on_deleted, config_map_from_proto(request.config))
+        return destination_pb2.Destination.Lifecycle.OnDeleted.Response()
+
+
+def _resolve_destination_config_class(
+    destination_cls: type[Destination[BaseConfig]],
+) -> type[BaseConfig]:
+    """Recover the concrete ``BaseConfig`` subclass a ``Destination[Config]`` used.
+
+    Thin, ``Destination``-specific wrapper over
+    :func:`conduit.connector._introspect.resolve_config_class`.
+    """
+    return resolve_config_class(destination_cls, Destination)

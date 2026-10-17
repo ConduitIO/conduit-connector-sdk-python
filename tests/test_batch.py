@@ -1,4 +1,4 @@
-"""Tests for :mod:`conduit._batch` -- ``sdk.batch.size``/``sdk.batch.delay``.
+"""Tests for :mod:`conduit.connector._batch` -- ``sdk.batch.size``/``sdk.batch.delay``.
 
 Covers the three independently interesting pieces: :class:`BatchConfig`'s
 exact Go-matching activation threshold, :func:`extract_batch_config`'s
@@ -17,7 +17,7 @@ import datetime
 
 import pytest
 
-from conduit._batch import (
+from conduit.connector._batch import (
     BATCH_DELAY_KEY,
     BATCH_SIZE_KEY,
     BatchConfig,
@@ -25,7 +25,7 @@ from conduit._batch import (
     extract_batch_config,
     sdk_batch_parameters,
 )
-from conduit.errors import (
+from conduit.connector.errors import (
     INVALID_BATCH_DELAY_CODE,
     INVALID_BATCH_SIZE_CODE,
     ConfigValidationError,

@@ -8,7 +8,7 @@ rows (each with an ``id`` field) newer than that cursor, oldest-first.
 
 Run it directly with ``python main.py`` under a real go-plugin host
 (Conduit); it is not meant to be run as a plain script otherwise -- see
-``conduit._handshake`` for why (this process expects
+``conduit.connector._handshake`` for why (this process expects
 ``CONDUIT_PLUGIN_MAGIC_COOKIE``/``PLUGIN_PROTOCOL_VERSIONS`` to be set by
 the launching host).
 
@@ -24,8 +24,8 @@ from datetime import UTC, datetime
 
 import httpx
 
-from conduit import BackoffRetry, Change, Metadata, Operation, Record, Source, serve
-from conduit.config import BaseConfig, Field, Specification
+from conduit.connector import BackoffRetry, Change, Metadata, Operation, Record, Source, serve
+from conduit.connector.config import BaseConfig, Field, Specification
 
 
 class Config(BaseConfig):
@@ -59,7 +59,7 @@ class HTTPPollSource(Source[Config]):
         """Fetch the next row past ``self._since``, or signal there's nothing yet.
 
         Raises:
-            conduit.errors.BackoffRetry: the endpoint returned no new rows;
+            conduit.connector.errors.BackoffRetry: the endpoint returned no new rows;
                 the SDK's own read loop paces retries -- this does not
                 sleep itself, avoiding a double backoff (design doc §2.7).
         """
