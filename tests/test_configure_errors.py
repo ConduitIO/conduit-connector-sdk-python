@@ -14,12 +14,12 @@ import grpc.aio
 import pytest
 
 import conduit._grpc  # noqa: F401  -- sets up sys.path, see conduit._grpc.__init__
-from conduit.config import BaseConfig, Field, Specification
-from conduit.destination import Destination
-from conduit.errors import BackoffRetry
-from conduit.record import Record
-from conduit.serve import _build_plugin_server
-from conduit.source import Source
+from conduit.connector.config import BaseConfig, Field, Specification
+from conduit.connector.destination import Destination
+from conduit.connector.errors import BackoffRetry
+from conduit.connector.record import Record
+from conduit.connector.serve import _build_plugin_server
+from conduit.connector.source import Source
 from connector.v2 import destination_pb2, source_pb2
 
 _SPEC = Specification(name="test-plugin", version="0.0.0", author="test")

@@ -5,9 +5,9 @@ round-trips each shape byte-for-byte in isolation) by proving the full
 `_SourceServicer`/`_DestinationServicer` adapter paths -- ack handling,
 batching, write/nack accounting -- behave correctly for each shape, not
 just the codec underneath them. `raw`/`structured` cover
-`conduit.record.Data`'s two-way `bytes | Mapping` contract (design doc
+`conduit.connector.record.Data`'s two-way `bytes | Mapping` contract (design doc
 §2.3); `tombstone` covers a `DELETE` record with no payload at all (see
-`conduit.testing.fixtures.tombstone_record`), the shape most likely to
+`conduit.connector.testing.fixtures.tombstone_record`), the shape most likely to
 trip up code that assumes `payload.after` (or `before`) is always present.
 """
 
@@ -17,12 +17,12 @@ import asyncio
 
 import conduit._grpc  # noqa: F401  -- sets up sys.path, see conduit._grpc.__init__
 from conduit._grpc.adapters import record_from_proto
-from conduit.config import BaseConfig
-from conduit.destination import Destination, _DestinationServicer
-from conduit.errors import BackoffRetry
-from conduit.record import Record
-from conduit.source import Source, _SourceServicer
-from conduit.testing.fixtures import create_record, raw_record, tombstone_record
+from conduit.connector.config import BaseConfig
+from conduit.connector.destination import Destination, _DestinationServicer
+from conduit.connector.errors import BackoffRetry
+from conduit.connector.record import Record
+from conduit.connector.source import Source, _SourceServicer
+from conduit.connector.testing.fixtures import create_record, raw_record, tombstone_record
 
 _RAW = raw_record(b"pos-raw", b"raw-key", b"raw-value")
 _STRUCTURED = create_record(b"pos-structured", "1", {"id": "1", "name": "widget"})

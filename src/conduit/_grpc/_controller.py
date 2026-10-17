@@ -53,7 +53,7 @@ def build_controller_handler(on_shutdown: ShutdownHandler) -> grpc.GenericRpcHan
     """Build the generic RPC handler implementing ``plugin.GRPCController``.
 
     Registered via ``server.add_generic_rpc_handlers`` (see
-    :mod:`conduit.serve`) rather than a generated ``add_*Servicer_to_server``
+    :mod:`conduit.connector.serve`) rather than a generated ``add_*Servicer_to_server``
     function, since there is no generated stub for this service (see module
     docstring).
 

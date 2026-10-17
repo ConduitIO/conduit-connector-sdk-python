@@ -18,7 +18,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from conduit._grpc.adapters import record_from_proto, record_to_proto
-from conduit.record import Change, Operation, Record
+from conduit.connector.record import Change, Operation, Record
 
 # JSON-like scalar/collection strategy for `structured_data`, deliberately
 # bounded to integers that fit in a double's 53-bit mantissa exactly -- this

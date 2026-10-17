@@ -1,4 +1,4 @@
-"""Unit tests for :mod:`conduit._handshake`.
+"""Unit tests for :mod:`conduit.connector._handshake`.
 
 These assert the exact wire format go-plugin's client parser expects
 (``go-plugin@v1.8.0/client.go:838-926``: split on ``|``, at least 4 parts),
@@ -14,7 +14,7 @@ import io
 
 import pytest
 
-from conduit._handshake import (
+from conduit.connector._handshake import (
     CORE_PROTOCOL_VERSION,
     MAGIC_COOKIE_KEY,
     MAGIC_COOKIE_VALUE,

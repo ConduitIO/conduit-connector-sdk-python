@@ -1,4 +1,4 @@
-"""Tests for :mod:`conduit.destination` -- the B1 partial-batch-write fix.
+"""Tests for :mod:`conduit.connector.destination` -- the B1 partial-batch-write fix.
 
 ``test_destination_partial_write_nacks_all`` is the concrete, automated form
 of the design doc's B1 fix (§2.5): an incomplete/absent per-index accounting
@@ -11,10 +11,10 @@ from typing import ClassVar
 
 import pytest
 
-from conduit.config import BaseConfig
-from conduit.destination import Destination, _DestinationServicer
-from conduit.errors import BatchWriteError
-from conduit.record import Operation, Record
+from conduit.connector.config import BaseConfig
+from conduit.connector.destination import Destination, _DestinationServicer
+from conduit.connector.errors import BatchWriteError
+from conduit.connector.record import Operation, Record
 
 
 class _Config(BaseConfig):

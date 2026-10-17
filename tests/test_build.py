@@ -1,4 +1,4 @@
-"""Tests for ``conduit-connector-sdk build`` (:mod:`conduit._build`/``_cli``).
+"""Tests for ``conduit-connector-sdk build`` (:mod:`conduit.connector._build`/``_cli``).
 
 Builds the real worked example connector (``examples/http-poll-source``)
 into a self-contained artifact and **execs the resulting file directly**
@@ -20,8 +20,8 @@ from pathlib import Path
 
 import pytest
 
-from conduit._build import BuildError, build_connector_artifact
-from conduit._handshake import MAGIC_COOKIE_KEY, MAGIC_COOKIE_VALUE, PROTOCOL_VERSIONS_ENV
+from conduit.connector._build import BuildError, build_connector_artifact
+from conduit.connector._handshake import MAGIC_COOKIE_KEY, MAGIC_COOKIE_VALUE, PROTOCOL_VERSIONS_ENV
 
 _EXAMPLE_PROJECT_DIR = Path(__file__).resolve().parent.parent / "examples" / "http-poll-source"
 
@@ -140,7 +140,7 @@ class TestBuildConnectorArtifact:
         reason=(
             "Windows has no real SIGTERM: subprocess.Popen.send_signal(SIGTERM) "
             "maps to TerminateProcess() there -- an unconditional hard kill, not "
-            "something conduit.serve's SIGTERM handler ever sees -- so this test "
+            "something conduit.connector.serve's SIGTERM handler ever sees -- so this test "
             "would not exercise the graceful path it's meant to pin at all. "
             "Windows-native graceful shutdown is a documented open risk in the "
             "design doc ('Windows subprocess launch specifics'), not solved here."

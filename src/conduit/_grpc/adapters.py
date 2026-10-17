@@ -22,7 +22,7 @@ from google.protobuf import struct_pb2
 from google.protobuf.json_format import MessageToDict
 
 import conduit._grpc  # noqa: F401  -- sets up sys.path, see conduit._grpc.__init__
-from conduit.record import Change, Data, Operation, Record
+from conduit.connector.record import Change, Data, Operation, Record
 from opencdc.v1 import opencdc_pb2
 
 __all__ = [
@@ -117,7 +117,7 @@ def _data_from_proto_optional(data: opencdc_pb2.Data) -> Data | None:
 
 
 def _change_to_proto(change: Change) -> opencdc_pb2.Change:
-    """Encode a :class:`~conduit.record.Change` to wire ``opencdc.Change``."""
+    """Encode a :class:`~conduit.connector.record.Change` to wire ``opencdc.Change``."""
     return opencdc_pb2.Change(
         before=_data_to_proto_optional(change.before),
         after=_data_to_proto_optional(change.after),
@@ -125,7 +125,7 @@ def _change_to_proto(change: Change) -> opencdc_pb2.Change:
 
 
 def _change_from_proto(change: opencdc_pb2.Change) -> Change:
-    """Decode a wire ``opencdc.Change`` to :class:`~conduit.record.Change`."""
+    """Decode a wire ``opencdc.Change`` to :class:`~conduit.connector.record.Change`."""
     return Change(
         before=_data_from_proto_optional(change.before),
         after=_data_from_proto_optional(change.after),
@@ -133,7 +133,7 @@ def _change_from_proto(change: opencdc_pb2.Change) -> Change:
 
 
 def record_to_proto(record: Record) -> opencdc_pb2.Record:
-    """Encode a :class:`~conduit.record.Record` to wire ``opencdc.Record``.
+    """Encode a :class:`~conduit.connector.record.Record` to wire ``opencdc.Record``.
 
     Args:
         record: the Python-side record.
@@ -151,7 +151,7 @@ def record_to_proto(record: Record) -> opencdc_pb2.Record:
 
 
 def record_from_proto(record: opencdc_pb2.Record) -> Record:
-    """Decode a wire ``opencdc.Record`` to :class:`~conduit.record.Record`.
+    """Decode a wire ``opencdc.Record`` to :class:`~conduit.connector.record.Record`.
 
     Args:
         record: the wire-side record.
@@ -169,12 +169,12 @@ def record_from_proto(record: opencdc_pb2.Record) -> Record:
 
 
 def records_to_proto(records: Iterable[Record]) -> list[opencdc_pb2.Record]:
-    """Encode an iterable of :class:`~conduit.record.Record` to wire records."""
+    """Encode an iterable of :class:`~conduit.connector.record.Record` to wire records."""
     return [record_to_proto(r) for r in records]
 
 
 def records_from_proto(records: Iterable[opencdc_pb2.Record]) -> list[Record]:
-    """Decode an iterable of wire records to :class:`~conduit.record.Record`."""
+    """Decode an iterable of wire records to :class:`~conduit.connector.record.Record`."""
     return [record_from_proto(r) for r in records]
 
 

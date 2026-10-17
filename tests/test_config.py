@@ -1,4 +1,4 @@
-"""Tests for :mod:`conduit.config` -- ``BaseConfig``/``Field``/``to_parameters``.
+"""Tests for :mod:`conduit.connector.config` -- ``BaseConfig``/``Field``/``to_parameters``.
 
 Covers the design doc §2.2 mapping rules. ``TYPE_DURATION`` (``timedelta``
 fields) is now a real, round-tripping mapping -- see
@@ -15,7 +15,7 @@ from typing import Literal
 import pytest
 
 import conduit._grpc  # noqa: F401  -- sets up sys.path, see conduit._grpc.__init__
-from conduit.config import BaseConfig, Field, Specification, to_parameters
+from conduit.connector.config import BaseConfig, Field, Specification, to_parameters
 from config.v1 import parameter_pb2
 
 

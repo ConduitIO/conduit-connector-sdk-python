@@ -1,4 +1,4 @@
-"""Tests for :func:`conduit.config.format_go_duration`/``parse_go_duration``.
+"""Tests for :func:`conduit.connector.config.format_go_duration`/``parse_go_duration``.
 
 The Go-duration mapping (design doc §2.2's Duration A-gap, now closed):
 ``config.Parameter.Type.TYPE_DURATION`` fields serialize/parse using Go's
@@ -16,7 +16,7 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from conduit.config import format_go_duration, parse_go_duration
+from conduit.connector.config import format_go_duration, parse_go_duration
 
 # Known-good (string, timedelta) pairs matching Go's actual `String()` output
 # for the same duration -- these pin compatibility with real Go tooling, not

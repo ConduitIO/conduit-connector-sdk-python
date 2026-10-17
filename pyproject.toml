@@ -3,17 +3,22 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "conduit-connector-sdk"
+# The distribution name is `conduitio` (the `conduit` PyPI name was not
+# available; `conduitio` is reserved via .github/workflows/reserve-conduitio.yml,
+# issue #5). The import package is `conduit`, a PEP 420 namespace exposing
+# `conduit.connector` and `conduit.client` -- see
+# docs/design/20261016-python-ga-merged-distribution.md.
+name = "conduitio"
 # NOTE: version is a placeholder until the first tagged release; the release
-# workflow (fast-follow, see docs/design/20260707-python-connector-sdk.md §3)
-# will drive this from git tags.
+# workflow will drive this from git tags. Both namespaces share this one
+# semantic version.
 version = "0.1.0.dev0"
-description = "Python SDK for building Conduit source and destination connectors."
+description = "Conduit for Python: the connector SDK (conduit.connector) and the gRPC control client (conduit.client) in one distribution."
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.11"
 authors = [{ name = "Conduit contributors" }]
-keywords = ["conduit", "connector", "sdk", "cdc", "grpc"]
+keywords = ["conduit", "connector", "client", "sdk", "cdc", "grpc", "etl"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -27,29 +32,38 @@ classifiers = [
 dependencies = [
     "grpcio>=1.75,<2",
     "protobuf>=6.31,<8",
+    # conduit.connector: pydantic-based config with automatic parameter
+    # introspection (BaseConfig/Field/to_parameters).
     "pydantic>=2.7,<3",
-    # Standard package for grpc.health.v1 (SERVING/NOT_SERVING for the
-    # "plugin" service go-plugin's client probes, §1.1.5) -- not hand-rolled,
-    # per the Lane B build task and CLAUDE.md ("don't hand-roll the
-    # standard thing"). Runtime dependency, not dev-only: `conduit.serve`
-    # registers this health servicer on every plugin process.
+    # conduit.connector: grpc.health.v1 (SERVING/NOT_SERVING for the
+    # "plugin" service go-plugin's client probes) -- not hand-rolled, per
+    # the Lane B build task and CLAUDE.md. Runtime, not dev-only:
+    # `conduit.connector.serve` registers this health servicer on every
+    # plugin process.
     "grpcio-health-checking>=1.75,<2",
-    # Used by `conduit-connector-sdk build` (conduit/_build.py) to parse
-    # PEP 508 requirement strings and normalize distribution names when
-    # vendoring a connector's dependencies -- already a transitive
-    # dependency of pip/hatchling in practice, but a real, direct runtime
-    # dependency of this SDK's own `build` command, so declared explicitly
-    # rather than relied on implicitly.
+    # conduit.connector: `conduit-connector-sdk build` parses PEP 508
+    # requirement strings and normalizes distribution names when vendoring a
+    # connector's dependencies.
     "packaging>=23,<26",
+    # conduit.client: decodes the rich google.rpc.Status/ErrorInfo detail
+    # Conduit's server attaches to every ConduitError crossing the gRPC
+    # boundary (conduit.client.errors).
+    "grpcio-status>=1.75,<2",
+    # conduit.client: google.rpc.error_details_pb2 (ErrorInfo), imported by
+    # name (not just relied on as a transitive dep of grpcio-status).
+    "googleapis-common-protos>=1.65,<2",
+    # conduit.client: cross-platform user cache dir for the provisioned
+    # `conduit` binary (conduit.client.local's download-on-first-use path).
+    "platformdirs>=4,<5",
 ]
 
 [project.scripts]
 # `build` packages a connector project into a self-contained,
-# directly-executable artifact -- see conduit/_build.py's module
+# directly-executable artifact -- see conduit/connector/_build.py's module
 # docstring for why this is required (not just convenient) for Conduit to
 # launch a standalone connector (design doc §1.1.6: Conduit execs with a
 # clean environment, no inherited PATH).
-conduit-connector-sdk = "conduit._cli:main"
+conduit-connector-sdk = "conduit.connector._cli:main"
 
 [project.urls]
 Homepage = "https://github.com/ConduitIO/conduit-connector-sdk-python"
@@ -65,30 +79,22 @@ dev = [
     "pytest-asyncio>=0.25,<1",
     "hypothesis>=6.120,<7",
     "grpc-stubs>=1.24,<2",
-    # Type stubs for google.protobuf (e.g. empty_pb2.Empty in serve.py/
-    # _grpc/_controller.py) -- without this, mypy reports "Library stubs
-    # not installed for google.protobuf" under strict mode.
+    # Type stubs for google.protobuf (e.g. empty_pb2.Empty in
+    # conduit/connector/serve.py and _grpc/_controller.py).
     "types-protobuf>=6.30,<7",
-    # Bounds the hung-event-loop watchdog test (▶ MUST-FIX 3) and the
-    # deterministic-shutdown test (▶ MUST-FIX 2) so a regression that makes
-    # either hang fails CI promptly instead of hanging the test run itself.
+    # Bounds the hung-event-loop watchdog test and the deterministic-shutdown
+    # test so a regression that makes either hang fails CI promptly.
     "pytest-timeout>=2.3,<3",
     # Only used by the example connector (examples/http-poll-source/main.py)
-    # and this repo's acceptance test for it
-    # (tests/test_example_http_poll_source.py) -- not a runtime dependency
-    # of the SDK itself.
+    # and its acceptance test -- not a runtime dependency of the package.
     "httpx>=0.27,<1",
 ]
 
-# Avro schema support (`conduit.schema`) -- not a core runtime dependency,
-# since most connectors never touch Avro at all. `fastavro` is used because
-# it exposes `schemaless_writer`/`schemaless_reader`: plain, headerless
-# Avro binary encoding with no embedded schema-registry framing, matching
-# exactly what conduit-commons' schema/avro package (a thin wrapper over
-# `github.com/iskorotkov/avro/v2`, the maintained fork of the archived
-# `hamba/avro/v2`; adopted in conduit-commons#279) produces on the wire --
-# see `conduit/schema.py`'s module docstring for the full
-# wire-compatibility contract and its proof.
+# Avro schema support (`conduit.connector.schema`) -- not a core runtime
+# dependency, since most connectors never touch Avro. `fastavro` exposes
+# `schemaless_writer`/`schemaless_reader`: plain, headerless Avro binary
+# encoding matching exactly what conduit-commons' schema/avro package produces
+# on the wire -- see `conduit/connector/schema.py`'s module docstring.
 avro = ["fastavro>=1.9,<2"]
 
 [tool.hatch.build.targets.wheel]
@@ -98,16 +104,13 @@ packages = ["src/conduit"]
 include = ["src", "README.md", "LICENSE"]
 
 # --- ruff -------------------------------------------------------------------
-# Single tool for lint + format, replacing black/isort/flake8 (matches the
-# design doc's tooling choice, docs/design/20260707-python-connector-sdk.md §3).
+# Single tool for lint + format, replacing black/isort/flake8.
 [tool.ruff]
 target-version = "py311"
 line-length = 100
 src = ["src", "tests", "examples"]
 # Generated protobuf/grpc stubs (buf generate output, see tools/generate-stubs.sh)
-# are vendored, not hand-written -- excluded from both lint and format, not
-# just lint (per-file-ignores below only covers lint rule selection, `ruff
-# format` needs its own exclude).
+# are vendored, not hand-written -- excluded from both lint and format.
 extend-exclude = [
     "src/conduit/_grpc/**/*_pb2.py",
     "src/conduit/_grpc/**/*_pb2_grpc.py",
@@ -123,8 +126,7 @@ select = [
     "UP",  # pyupgrade
     "B",   # bugbear
     "C4",  # comprehensions
-    "ASYNC", # async-specific lint (flags blocking calls in async def, relevant
-             # to the hung-event-loop failure mode, see docs/design/*)
+    "ASYNC", # async-specific lint (flags blocking calls in async def)
     "D",   # pydocstyle (docstring coverage on the public API surface)
     "RUF", # ruff-specific
 ]
@@ -134,8 +136,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-# Generated protobuf/grpc stubs are vendored output, not hand-written code —
-# excluded from docstring/lint requirements. See src/conduit/_grpc/__init__.py.
+# Generated protobuf/grpc stubs are vendored output, not hand-written code.
 "src/conduit/_grpc/**/*_pb2.py" = ["ALL"]
 "src/conduit/_grpc/**/*_pb2_grpc.py" = ["ALL"]
 "src/conduit/_grpc/**/*.pyi" = ["ALL"]
@@ -146,20 +147,13 @@ ignore = [
 convention = "google"
 
 [tool.ruff.lint.isort]
-# `connector`/`config`/`opencdc` are the generated gRPC/protobuf stubs'
-# top-level package names -- reachable only because `conduit._grpc`'s own
-# `__init__.py` prepends its directory to `sys.path` at import time (see
-# that module's docstring). Without this, ruff's isort treats them as
-# third-party (unrecognized names), which sorts the *whole* third-party
-# import block before the first-party `import conduit._grpc` line that
-# must run first for the sys.path side effect to take effect -- that
-# reordering is a real correctness bug (verified: it breaks the import
-# chain at runtime, not just a style nit), not a hypothetical one. Treating
-# these as known-first-party groups them with `conduit` imports, where
-# alphabetical order happens to place `conduit` before `config`/
-# `connector`/`opencdc` -- keeping `ruff check --fix`/`ruff format`
-# idempotent against the ordering this code actually depends on.
-known-first-party = ["conduit", "config", "connector", "opencdc"]
+# `connector`/`api`/`config`/`opencdc`/`google`/`protoc_gen_openapiv2` are the
+# generated gRPC/protobuf stubs' top-level package names -- reachable only
+# because `conduit._grpc`'s own `__init__.py` prepends its directory to
+# `sys.path` at import time. Treating these as known-first-party groups them
+# with `conduit` imports so `ruff check --fix`/`ruff format` stay idempotent
+# against the sys.path side-effect ordering this code depends on.
+known-first-party = ["conduit", "api", "config", "connector", "opencdc"]
 
 [tool.ruff.format]
 quote-style = "double"
@@ -171,46 +165,61 @@ strict = true
 packages = ["conduit"]
 # `src/conduit/_grpc` is also on mypy_path (not just `src`): protoc's Python
 # codegen emits *absolute* imports rooted at each .proto file's own package
-# path (e.g. `from connector.v2 import source_pb2`, `from config.v1 import
-# parameter_pb2`), not imports nested under `conduit._grpc` -- see
-# `src/conduit/_grpc/__init__.py`'s docstring for why (protobuf codegen's own
-# "DO NOT EDIT" output, not patched to nest the imports). At runtime that
-# package's `__init__.py` prepends its own directory to `sys.path` so those
-# absolute imports resolve; mypy has no equivalent of a runtime sys.path
-# mutation, so it needs the same directory on `mypy_path` statically, or it
-# can't find `connector.v2`/`config.v1`/`opencdc.v1` as modules at all (this
-# was found to be missing, not a pre-existing decision -- see PR description).
+# path (e.g. `from connector.v2 import source_pb2`, `from api.v1 import
+# api_pb2`), not imports nested under `conduit._grpc` -- see
+# `src/conduit/_grpc/__init__.py`'s docstring. mypy has no equivalent of the
+# runtime sys.path mutation that module performs, so it needs the same
+# directory on `mypy_path` statically.
 mypy_path = ["src", "src/conduit/_grpc"]
 exclude = [
     "src/conduit/_grpc/.*_pb2.*",
-    # These three subtrees are reached exclusively via the top-level
-    # `connector`/`config`/`opencdc` names (the second `mypy_path` entry
-    # above) -- excluding them here too stops mypy's `packages` walk from
-    # *also* discovering them as `conduit._grpc.connector`/`.config`/
-    # `.opencdc`, which otherwise collides ("Source file found twice under
-    # different module names") since both paths resolve to the same files.
+    # These subtrees are reached exclusively via the top-level
+    # `connector`/`api`/`config`/`opencdc`/`google`/`protoc_gen_openapiv2`
+    # names (the second `mypy_path` entry above) -- excluding them here too
+    # stops mypy's `packages` walk from also discovering them under
+    # `conduit._grpc.*`, which would otherwise collide ("Source file found
+    # twice under different module names").
     "^src/conduit/_grpc/connector/",
+    "^src/conduit/_grpc/api/",
     "^src/conduit/_grpc/config/",
     "^src/conduit/_grpc/opencdc/",
+    "^src/conduit/_grpc/google/",
+    "^src/conduit/_grpc/protoc_gen_openapiv2/",
 ]
 
 [[tool.mypy.overrides]]
 # Generated stubs are not held to strict mode; they're vendored, regenerated
-# output (see Lane A, docs/design/20260707-python-connector-sdk.md §1.5).
-# The `connector.*`/`config.*`/`opencdc.*` module names are the *same*
-# generated stubs, reached via the absolute-import top-level names protoc
-# emits (see the `mypy_path` comment above) rather than through
-# `conduit._grpc.*` -- both patterns need to be excluded for the same
-# vendored-code reason, they're just two different names for the same files.
-module = ["conduit._grpc.*", "connector.*", "config.*", "opencdc.*"]
+# output. The `connector.*`/`api.*`/`config.*`/`opencdc.*`/`google.api.*`/
+# `protoc_gen_openapiv2.*` names are the same generated stubs, reached via the
+# absolute-import top-level names protoc emits rather than through
+# `conduit._grpc.*`.
+module = [
+    "conduit._grpc.*",
+    "connector.*",
+    "api.*",
+    "config.*",
+    "opencdc.*",
+    "google.api.*",
+    "protoc_gen_openapiv2.*",
+]
 ignore_errors = true
+
+[[tool.mypy.overrides]]
+# googleapis-common-protos ships .pyi files for google.rpc.* but no py.typed
+# marker, so mypy treats it as untyped by default even though real stubs
+# exist on disk; same for grpc_status (grpcio-status), which ships no stubs
+# at all. Both are third-party, not vendored by this repo.
+module = ["google.rpc.*", "grpc_status.*"]
+ignore_missing_imports = true
 
 # --- pytest ------------------------------------------------------------------
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-# A generous global ceiling (not the watchdog/shutdown tests' own much
-# tighter deadlines) so a genuine regression that hangs a test -- e.g. the
-# hung-event-loop watchdog silently failing to fire -- fails CI with a
+markers = [
+    "integration: requires a real `conduit` binary (network download or PATH); skipped by default in sandboxed/offline runs",
+]
+# A generous global ceiling so a genuine regression that hangs a test (e.g.
+# the hung-event-loop watchdog silently failing to fire) fails CI with a
 # clear timeout instead of hanging the whole run indefinitely.
 timeout = 60

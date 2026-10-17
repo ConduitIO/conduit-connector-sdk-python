@@ -9,14 +9,14 @@ description = "Example Conduit source connector: polls an HTTP endpoint for new 
 requires-python = ">=3.11"
 # This mirrors what `conduit connector new --lang python` will scaffold
 # (Phase 3, design doc §3/§4) -- a standalone connector project depending
-# on the published `conduit-connector-sdk` package. Pinned as a local path
-# dependency here since this example lives inside the SDK's own repo and is
-# exercised by the SDK's own test suite (../../tests/test_example_http_poll_source.py),
-# not published to PyPI itself.
+# on the published `conduitio` distribution (import package `conduit`).
+# Pinned as a local path dependency here since this example lives inside the
+# SDK's own repo and is exercised by the SDK's own test suite
+# (../../tests/test_example_http_poll_source.py), not published to PyPI itself.
 dependencies = [
-    "conduit-connector-sdk",
+    "conduitio",
     "httpx>=0.27,<1",
 ]
 
 [tool.uv.sources]
-conduit-connector-sdk = { path = "../..", editable = true }
+conduitio = { path = "../..", editable = true }

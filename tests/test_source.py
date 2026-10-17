@@ -1,4 +1,4 @@
-"""Tests for :mod:`conduit.source` -- ack ordering (invariant 1) and backoff parity.
+"""Tests for :mod:`conduit.connector.source` -- ack ordering (invariant 1) and backoff parity.
 
 The central property under test: a source record's position is only ever
 acknowledged to the connector (``Source.ack``) after Conduit's ``Run``
@@ -14,10 +14,10 @@ from collections.abc import Callable
 import pytest
 
 from conduit._grpc.adapters import record_from_proto
-from conduit.config import BaseConfig
-from conduit.errors import BackoffRetry
-from conduit.record import Operation, Record
-from conduit.source import (
+from conduit.connector.config import BaseConfig
+from conduit.connector.errors import BackoffRetry
+from conduit.connector.record import Operation, Record
+from conduit.connector.source import (
     BACKOFF_MAX_SECONDS,
     BACKOFF_MIN_SECONDS,
     Source,

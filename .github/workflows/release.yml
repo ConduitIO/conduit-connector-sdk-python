@@ -2,15 +2,17 @@ name: release
 
 # Release to PyPI via Trusted Publishing (GitHub OIDC), no API token.
 #
-# The PyPI pending publisher was configured by DeVaris on 2026-08-03
-# (project `conduit-connector-sdk`, owner ConduitIO, repo
-# conduit-connector-sdk-python, workflow release.yml, no environment).
+# NOTE (distribution rename): the merged distribution is published as
+# `conduitio` (see pyproject.toml and README). A NEW PyPI pending publisher
+# must be configured -- project `conduitio`, owner ConduitIO, repo
+# conduit-connector-sdk-python, workflow release.yml, no environment -- before
+# the first tag push. The old `conduit-connector-sdk` / `conduit-client`
+# publishers do not match the new name. The `conduitio` name itself is
+# reserved by .github/workflows/reserve-conduitio.yml (issue #5).
 #
-# NOT YET GA: v0.20 WS2's GA bar is the acceptance suite green in CI plus a
-# first tagged release. The batching and Avro/schema middleware that bar also
-# names are NOT implemented yet (no middleware module exists in src/), so
-# tagging now would publish a package that does not meet its own stated scope.
-# Publishing is wired here so the tag is the only remaining step once it does.
+# NOT YET GA: the GA bar is the acceptance suite green in CI plus a first
+# tagged release for each namespace. Publishing is wired here so the tag is
+# the only remaining step once that bar is met.
 on:
   push:
     tags: ["v*"]

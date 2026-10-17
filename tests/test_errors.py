@@ -1,4 +1,4 @@
-"""Tests for :mod:`conduit.errors` -- primarily ``BatchWriteError``'s B1 fix.
+"""Tests for :mod:`conduit.connector.errors` -- primarily ``BatchWriteError``'s B1 fix.
 
 The construction-time validation here is the concrete, automated form of
 the design doc's B1 fix (§2.5): "an index present in neither the success
@@ -12,8 +12,8 @@ from __future__ import annotations
 import pydantic
 import pytest
 
-from conduit.config import BaseConfig
-from conduit.errors import (
+from conduit.connector.config import BaseConfig
+from conduit.connector.errors import (
     BackoffRetry,
     BatchWriteError,
     ConfigFieldError,

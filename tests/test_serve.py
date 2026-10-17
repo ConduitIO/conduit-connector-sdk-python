@@ -1,4 +1,4 @@
-"""Tests for :mod:`conduit.serve` -- deterministic shutdown (▶ MUST-FIX 2),
+"""Tests for :mod:`conduit.connector.serve` -- deterministic shutdown (▶ MUST-FIX 2),
 the hung-event-loop watchdog (▶ MUST-FIX 3), and the SIGTERM-triggered
 in-flight-operation drain (invariant 7).
 
@@ -34,16 +34,16 @@ import pytest
 from google.protobuf import empty_pb2
 
 from conduit._grpc.adapters import record_to_proto
-from conduit.config import BaseConfig, Specification
-from conduit.destination import Destination
-from conduit.errors import BackoffRetry
-from conduit.record import Operation, Record
-from conduit.serve import (
+from conduit.connector.config import BaseConfig, Specification
+from conduit.connector.destination import Destination
+from conduit.connector.errors import BackoffRetry
+from conduit.connector.record import Operation, Record
+from conduit.connector.serve import (
     DEFAULT_SHUTDOWN_DEADLINE_SECONDS,
     _build_plugin_server,
     _ShutdownCoordinator,
 )
-from conduit.source import Source
+from conduit.connector.source import Source
 from connector.v2 import destination_pb2, destination_pb2_grpc, source_pb2, source_pb2_grpc
 
 _SPEC = Specification(name="test-plugin", version="0.0.0", author="test")
@@ -296,7 +296,7 @@ class TestShutdownCoordinatorWatchdog:
                 wedged_ready.set()
                 # A genuinely blocking, non-yielding call made directly
                 # inside `async def` -- the exact misbehavior MUST-FIX 3
-                # describes (not routed through `conduit._dispatch.invoke`,
+                # describes (not routed through `conduit.connector._dispatch.invoke`,
                 # which would correctly offload it to a thread pool instead).
                 # This is the test deliberately doing the wrong thing to
                 # prove the watchdog doesn't depend on it being done right.
@@ -328,7 +328,7 @@ class TestShutdownCoordinatorWatchdog:
 
 
 def test_serve_requires_exactly_one_of_source_or_destination() -> None:
-    from conduit.serve import serve
+    from conduit.connector.serve import serve
 
     with pytest.raises(ValueError, match="exactly one"):
         serve(_SPEC)

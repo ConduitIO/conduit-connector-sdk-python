@@ -1,16 +1,19 @@
-"""Tests for :mod:`conduit.testing.acceptance` itself -- run against a small
+"""Tests for :mod:`conduit.connector.testing.acceptance` itself -- run against a small
 synthetic source and destination, proving the suite's categories actually
 exercise real connector behavior (not stubs).
 """
 
 from __future__ import annotations
 
-from conduit.config import BaseConfig, Field
-from conduit.destination import Destination
-from conduit.errors import BackoffRetry
-from conduit.record import Change, Operation, Record
-from conduit.source import Source
-from conduit.testing.acceptance import AcceptanceTestSuite, ConfigurableAcceptanceTestDriver
+from conduit.connector.config import BaseConfig, Field
+from conduit.connector.destination import Destination
+from conduit.connector.errors import BackoffRetry
+from conduit.connector.record import Change, Operation, Record
+from conduit.connector.source import Source
+from conduit.connector.testing.acceptance import (
+    AcceptanceTestSuite,
+    ConfigurableAcceptanceTestDriver,
+)
 
 
 class _SourceConfig(BaseConfig):
@@ -50,7 +53,7 @@ class _InMemoryDestination(Destination[_DestinationConfig]):
 
 class TestAcceptance(AcceptanceTestSuite):
     def driver(self) -> ConfigurableAcceptanceTestDriver:
-        from conduit.config import Specification
+        from conduit.connector.config import Specification
 
         return ConfigurableAcceptanceTestDriver(
             spec=Specification(name="in-memory-test", version="0.0.0", author="test"),
