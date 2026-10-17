@@ -1,0 +1,42 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  unit:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        # Two most recent CPython minors on the 3.11+ floor.
+        python-version: ["3.12", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python-version }}
+      - run: uv sync --all-extras
+      # Unit tests only: builder->payload mapping, error translation,
+      # provisioning with a mocked download. No network, no real subprocess.
+      - run: uv run pytest -v -m "not integration"
+
+  integration:
+    # Spins up a real conduit binary via conduit.local() -- needs network
+    # access to GitHub Releases on the first run per OS/version combination.
+    # Runs on ubuntu only (the release asset matrix is exercised for real by
+    # the unit job's mocked-download tests across all three OSes; this job's
+    # job is proving the real download+launch path works at all, not
+    # re-proving cross-platform archive naming).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --all-extras
+      - run: uv run pytest -v -m integration

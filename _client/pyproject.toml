@@ -1,0 +1,194 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+# NOTE (open question for DeVaris, see README "Open questions"): final PyPI
+# distribution name is not settled -- the design doc's ADR left "conduit-embed"
+# vs. "conduit-client" vs. bare "conduit" (if unclaimed) open. Using
+# "conduit-client" here as the working name; trivial to rename before a real
+# release (no PyPI publish workflow is wired yet -- see .github/workflows/release.yml).
+name = "conduit-client"
+# NOTE: version is a placeholder until the first tagged release; the release
+# workflow will drive this from git tags (matches conduit-connector-sdk-python's
+# not-yet-automated release story).
+version = "0.1.0.dev1"
+description = "Python client library for defining and running Conduit pipelines over its control-plane gRPC API."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.11"
+authors = [{ name = "Conduit contributors" }]
+keywords = ["conduit", "client", "sdk", "grpc", "embed", "etl", "cdc"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries",
+]
+
+dependencies = [
+    "grpcio>=1.75,<2",
+    "protobuf>=6.31,<8",
+    # Decodes the rich google.rpc.Status / google.rpc.ErrorInfo detail Conduit's
+    # server attaches to every ConduitError crossing the gRPC boundary
+    # (pkg/foundation/cerrors/conduiterr/status.go's ToStatus) -- reason,
+    # configPath, suggestion, docsUrl. This is the standard companion package
+    # for grpc's rich-error-model API (grpc_status.rpc_status.from_call), not
+    # hand-rolled trailer parsing. See conduit/errors.py.
+    "grpcio-status>=1.75,<2",
+    # Provides google.rpc.error_details_pb2 (ErrorInfo) that errors.py unpacks
+    # directly -- a transitive dep of grpcio-status already, declared
+    # explicitly because this package imports it by name, not just relies on
+    # what grpcio-status happens to pull in.
+    "googleapis-common-protos>=1.65,<2",
+    # Cross-platform user cache dir for the provisioned `conduit` binary
+    # (conduit.local()'s download-on-first-use path, see conduit/_provision.py).
+    # Small, pure-Python, no transitive deps -- the standard tool for this
+    # rather than hand-rolling XDG/macOS/Windows cache-path logic per platform.
+    "platformdirs>=4,<5",
+]
+
+[project.urls]
+Homepage = "https://github.com/ConduitIO/conduit-client-python"
+Repository = "https://github.com/ConduitIO/conduit-client-python"
+Issues = "https://github.com/ConduitIO/conduit-client-python/issues"
+
+[project.optional-dependencies]
+dev = [
+    "grpcio-tools>=1.75,<2",
+    "ruff>=0.14,<1",
+    "mypy>=1.15,<2",
+    "pytest>=8.3,<9",
+    "grpc-stubs>=1.24,<2",
+    # Type stubs for google.protobuf -- without this, mypy reports "Library
+    # stubs not installed for google.protobuf" under strict mode.
+    "types-protobuf>=6.30,<7",
+    # Bounds the integration test's engine-startup wait so a genuine
+    # regression (engine never becomes reachable) fails CI promptly instead
+    # of hanging the run.
+    "pytest-timeout>=2.3,<3",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/conduit"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "README.md", "LICENSE"]
+
+# --- ruff -------------------------------------------------------------------
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src", "tests", "examples"]
+# Generated protobuf/grpc stubs (buf generate output, see tools/generate-stubs.sh)
+# are vendored, not hand-written -- excluded from both lint and format.
+extend-exclude = [
+    "src/conduit/_grpc/**/*_pb2.py",
+    "src/conduit/_grpc/**/*_pb2_grpc.py",
+    "src/conduit/_grpc/**/*.pyi",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # bugbear
+    "C4",  # comprehensions
+    "D",   # pydocstyle (docstring coverage on the public API surface)
+    "RUF", # ruff-specific
+]
+ignore = [
+    "D203", # conflicts with D211 (no-blank-line-before-class)
+    "D213", # conflicts with D212 (multi-line-summary-first-line)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"src/conduit/_grpc/**/*_pb2.py" = ["ALL"]
+"src/conduit/_grpc/**/*_pb2_grpc.py" = ["ALL"]
+"src/conduit/_grpc/**/*.pyi" = ["ALL"]
+"tests/**" = ["D"]
+"examples/**" = ["D"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.isort]
+# The generated stubs' top-level package names (api/config/opencdc/google/
+# protoc_gen_openapiv2) are reachable only because conduit._grpc's own
+# __init__.py prepends its directory to sys.path at import time (see that
+# module's docstring). Same reasoning and same fix as
+# conduit-connector-sdk-python's identical isort config: without this, ruff's
+# isort treats them as third-party and can reorder imports in a way that
+# breaks the sys.path side-effect ordering -- a real correctness bug, not a
+# style nit.
+known-first-party = ["conduit", "api", "config", "opencdc"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+# --- mypy --------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.11"
+strict = true
+packages = ["conduit"]
+# src/conduit/_grpc is also on mypy_path (not just src): protoc's Python
+# codegen emits *absolute* imports rooted at each .proto file's own package
+# path (e.g. `from config.v1 import parameter_pb2`), not imports nested under
+# conduit._grpc -- see src/conduit/_grpc/__init__.py's docstring. mypy has no
+# equivalent of the runtime sys.path mutation that module performs, so it
+# needs the same directory on mypy_path statically to find `api.v1`/
+# `config.v1`/`opencdc.v1`/`google.api`/`protoc_gen_openapiv2` as modules.
+mypy_path = ["src", "src/conduit/_grpc"]
+exclude = [
+    "src/conduit/_grpc/.*_pb2.*",
+    # These subtrees are reached exclusively via the top-level api/config/
+    # opencdc/google/protoc_gen_openapiv2 names (the second mypy_path entry
+    # above) -- excluding them here too stops mypy's `packages` walk from
+    # also discovering them as conduit._grpc.api/.config/etc, which would
+    # otherwise collide ("Source file found twice under different module
+    # names") since both paths resolve to the same files.
+    "^src/conduit/_grpc/api/",
+    "^src/conduit/_grpc/config/",
+    "^src/conduit/_grpc/opencdc/",
+    "^src/conduit/_grpc/google/",
+    "^src/conduit/_grpc/protoc_gen_openapiv2/",
+]
+
+[[tool.mypy.overrides]]
+# Generated stubs are not held to strict mode; they're vendored, regenerated
+# output.
+module = [
+    "conduit._grpc.*",
+    "api.*",
+    "config.*",
+    "opencdc.*",
+    "google.api.*",
+    "protoc_gen_openapiv2.*",
+]
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+# googleapis-common-protos ships .pyi files for google.rpc.* but no py.typed
+# marker, so mypy treats it as untyped by default even though real stubs
+# exist on disk; same for grpc_status (grpcio-status), which ships no stubs
+# at all. Both are third-party, not vendored by this repo -- ignore-missing
+# rather than ignore-errors (there's no local file to exclude).
+module = ["google.rpc.*", "grpc_status.*"]
+ignore_missing_imports = true
+
+# --- pytest ------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: requires a real `conduit` binary (network download or PATH); skipped by default in sandboxed/offline runs",
+]
+# A generous global ceiling so a genuine regression that hangs a test (e.g.
+# conduit.local() never becoming reachable) fails CI with a clear timeout
+# instead of hanging the whole run indefinitely.
+timeout = 60

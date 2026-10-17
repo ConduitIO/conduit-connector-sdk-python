@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# Tooling caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.hypothesis/
+htmlcov/
+.coverage
+.coverage.*
+
+# uv
+.uv/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Generated protobuf/grpc stubs are checked in (vendored, see
+# tools/generate-stubs.sh and src/conduit/_grpc/__init__.py) -- do NOT ignore
+# src/conduit/_grpc/**, but ignore ad hoc regeneration scratch.
+buf-generate.log
+
+# conduit.local()'s default state_dir (./.conduit/state) and this repo's
+# quickstart example's state dir -- runtime artifacts, never committed.
+.conduit/
+conduit-state/

@@ -1,0 +1,20 @@
+version: v1
+# Generates Python protobuf/grpc stubs for the control-plane API
+# (proto/api/v1/api.proto) plus its transitive proto dependencies, per
+# docs/design/20260724-embed-grpc-client-libraries.md and
+# src/conduit/_grpc/__init__.py's docstring for why the dependency trees are
+# vendored too (descriptor-pool resolution of message/method options, not
+# because this client uses those types directly).
+#
+# Output is vendored, generated code -- never hand-edited. Regenerate via
+# ./tools/generate-stubs.sh, which issues one `buf generate` invocation per
+# BSR module below, each scoped with `--path` (a bare `buf generate` against
+# buf.build/conduitio/conduit would also pull in unrelated proto packages
+# from the same module).
+plugins:
+  - plugin: buf.build/protocolbuffers/python:v29.2
+    out: src/conduit/_grpc
+  - plugin: buf.build/protocolbuffers/pyi:v29.2
+    out: src/conduit/_grpc
+  - plugin: buf.build/grpc/python:v1.68.0
+    out: src/conduit/_grpc
