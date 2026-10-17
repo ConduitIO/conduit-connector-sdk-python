@@ -66,7 +66,7 @@ def test_generator_to_log_pipeline_runs_end_to_end(
         .destination("log", level="info")
     )
 
-    with conduit.client.local(state_dir=state_dir, startup_timeout=60.0) as client:
+    with conduit.local(state_dir=state_dir, startup_timeout=60.0) as client:
         run = client.run(pipeline)
         status = run.wait_running(timeout=30.0)
         assert status.is_running

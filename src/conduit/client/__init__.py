@@ -24,7 +24,7 @@ Quickstart::
         .destination("log", level="info")
     )
 
-    with conduit.client.local(state_dir="./conduit-state") as client:
+    with conduit.local(state_dir="./conduit-state") as client:
         run = client.run(pipeline)
         run.wait_running()
         print(run.status())
